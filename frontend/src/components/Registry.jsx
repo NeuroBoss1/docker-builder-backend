@@ -270,9 +270,15 @@ export default function Registry() {
                       </button>
                       <button
                         onClick={() => deleteRegistry(reg.id)}
-                        style={{fontSize: '12px', padding: '4px 8px', backgroundColor: '#f44336'}}
+                        style={{
+                          fontSize: '12px',
+                          padding: '4px 8px',
+                          backgroundColor: '#fee',
+                          color: '#c33',
+                          border: '1px solid #fcc'
+                        }}
                       >
-                        Delete
+                        🗑️ Delete
                       </button>
                     </div>
                   </div>

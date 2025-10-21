@@ -317,6 +317,19 @@ async def list_creds(request: Request):
     return {"creds": res}
 
 
+@app.delete("/api/creds/{cred_name}")
+async def delete_cred(cred_name: str, request: Request):
+    """Delete a credential"""
+    info = await _get_user_from_request(request)
+    if not info or not info.get('sub'):
+        raise HTTPException(status_code=401, detail='Missing or invalid authentication')
+    sub = info['sub']
+    if _aredis_client is None:
+        raise HTTPException(status_code=500, detail="Redis not configured")
+    await _aredis_client.hdel(f"user:{sub}:creds", cred_name)
+    return {"ok": True}
+
+
 @app.get("/api/history")
 async def get_history(request: Request):
     info = await _get_user_from_request(request)

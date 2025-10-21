@@ -7,9 +7,6 @@ import Registry from './components/Registry'
 import Profile from './components/Profile'
 
 export default function App() {
-  // Auth is handled on backend via secrets/docker-puller-key.json file
-  // No frontend auth needed anymore
-
   const [route, setRoute] = useState(window.location.hash || '#/')
 
   useEffect(() => {
@@ -18,45 +15,111 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
 
+  // Navigation header component
+  const NavHeader = () => (
+    <header>
+      <h1>🐳 Docker Builder</h1>
+      <div style={{display: 'flex', gap: '12px', alignItems: 'center'}}>
+        <button
+          onClick={() => window.location.hash = '/'}
+          style={{display: 'flex', alignItems: 'center', gap: '6px'}}
+        >
+          🏠 Home
+        </button>
+        <button
+          onClick={() => window.location.hash = '/credentials'}
+          style={{display: 'flex', alignItems: 'center', gap: '6px'}}
+        >
+          🔑 Credentials
+        </button>
+        <button
+          onClick={() => window.location.hash = '/history'}
+          style={{display: 'flex', alignItems: 'center', gap: '6px'}}
+        >
+          📜 History
+        </button>
+        <button
+          onClick={() => window.location.hash = '/registry'}
+          style={{display: 'flex', alignItems: 'center', gap: '6px'}}
+        >
+          📦 Registry
+        </button>
+        <button
+          onClick={() => window.location.hash = '/profile'}
+          style={{display: 'flex', alignItems: 'center', gap: '6px'}}
+        >
+          👤 Profile
+        </button>
+      </div>
+    </header>
+  )
+
+  // Route to Credentials page
+  if (route === '#/credentials') {
+    return (
+      <div className="container">
+        <NavHeader />
+        <main style={{display: 'flex', justifyContent: 'center', padding: '20px'}}>
+          <div style={{maxWidth: '800px', width: '100%'}}>
+            <Creds />
+          </div>
+        </main>
+      </div>
+    )
+  }
+
+  // Route to History page
+  if (route === '#/history') {
+    return (
+      <div className="container">
+        <NavHeader />
+        <main style={{display: 'flex', justifyContent: 'center', padding: '20px'}}>
+          <div style={{maxWidth: '800px', width: '100%'}}>
+            <History />
+          </div>
+        </main>
+      </div>
+    )
+  }
+
   // Route to Registry page
   if (route === '#/registry') {
-    return <Registry />
+    return (
+      <div className="container">
+        <NavHeader />
+        <main style={{display: 'flex', justifyContent: 'center', padding: '20px'}}>
+          <div style={{maxWidth: '1000px', width: '100%'}}>
+            <Registry />
+          </div>
+        </main>
+      </div>
+    )
   }
 
   // Route to Profile page
   if (route === '#/profile') {
-    return <Profile />
+    return (
+      <div className="container">
+        <NavHeader />
+        <main style={{display: 'flex', justifyContent: 'center', padding: '20px'}}>
+          <div style={{maxWidth: '800px', width: '100%'}}>
+            <Profile />
+          </div>
+        </main>
+      </div>
+    )
   }
 
   // Main page (Builder)
   return (
     <div className="container">
-      <header>
-        <h1>🐳 Docker Builder</h1>
-        <div style={{display: 'flex', gap: '12px', alignItems: 'center'}}>
-          <button
-            onClick={() => window.location.hash = '/registry'}
-            style={{display: 'flex', alignItems: 'center', gap: '6px'}}
-          >
-            📦 Registry
-          </button>
-          <button
-            onClick={() => window.location.hash = '/profile'}
-            style={{display: 'flex', alignItems: 'center', gap: '6px'}}
-          >
-            👤 Profile
-          </button>
-        </div>
-      </header>
-
+      <NavHeader />
       <main>
         <section className="left">
           <BuildForm />
-          <Creds />
         </section>
         <section className="right">
           <Jobs />
-          <History />
         </section>
       </main>
     </div>

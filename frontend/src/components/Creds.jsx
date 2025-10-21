@@ -7,28 +7,38 @@ export default function Creds() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
 
+  const loadCreds = async () => {
+    try {
+      const r = await api.get('/creds')
+      setCreds(r.data.creds || {})
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
   useEffect(() => {
-    (async () => {
-      try {
-        const r = await api.get('/creds')
-        setCreds(r.data.creds || {})
-      } catch (e) {
-        console.error(e)
-      }
-    })()
+    loadCreds()
   }, [])
 
   const add = async () => {
     try {
       await api.post('/creds', { name, username, password })
       setName(''); setUsername(''); setPassword('')
-      const r = await api.get('/creds')
-      setCreds(r.data.creds || {})
+      await loadCreds()
     } catch (e) {
       alert('Failed to add cred: ' + (e.response?.data?.detail || e.message))
     }
   }
 
+  const deleteCred = async (credName) => {
+    if (!confirm(`Delete credential "${credName}"?`)) return
+    try {
+      await api.delete(`/creds/${encodeURIComponent(credName)}`)
+      await loadCreds()
+    } catch (e) {
+      alert('Failed to delete: ' + (e.response?.data?.detail || e.message))
+    }
+  }
 
   return (
     <div className="card">
@@ -60,6 +70,19 @@ export default function Creds() {
                   <span style={{fontWeight: '500', color: 'var(--text-primary)'}}>{k}</span>
                   <span style={{marginLeft: '8px', fontSize: '13px', color: 'var(--text-secondary)'}}>• {v.username}</span>
                 </div>
+                <button
+                  onClick={() => deleteCred(k)}
+                  style={{
+                    padding: '4px 12px',
+                    fontSize: '13px',
+                    background: '#fee',
+                    color: '#c33',
+                    border: '1px solid #fcc',
+                    cursor: 'pointer'
+                  }}
+                >
+                  🗑️ Delete
+                </button>
               </div>
             ))}
           </div>
