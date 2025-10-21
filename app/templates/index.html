@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Docker Builder</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 900px; margin: 40px auto; }
+    label { display:block; margin-top:12px; }
+    input, select, textarea { width:100%; padding:8px; box-sizing:border-box; }
+    button { margin-top:12px; padding:8px 16px; }
+    pre { background:#f6f6f6; padding:10px; max-height:300px; overflow:auto; }
+    .job { border:1px solid #ddd; padding:10px; margin-top:12px }
+  </style>
+</head>
+<body>
+  <h1>Docker Builder</h1>
+  <form id="buildForm">
+    <label>Repository URL
+      <input name="repo_url" placeholder="https://github.com/user/repo.git" required />
+    </label>
+    <label>Branch
+      <input name="branch" placeholder="main" />
+    </label>
+    <label>Tag
+      <input name="tag" placeholder="v1.0.0" required />
+    </label>
+    <label>Registry (host[:port] or full repo)
+      <input name="registry" placeholder="gcr.io/project/image or ghcr.io/user/image" required />
+    </label>
+    <label>Dockerfile path (optional)
+      <input name="dockerfile_path" placeholder="Dockerfile or path/to/Dockerfile" />
+    </label>
+    <label>Registry username (optional)
+      <input name="registry_username" />
+    </label>
+    <label>Registry password (optional)
+      <input type="password" name="registry_password" />
+    </label>
+    <label>GCP Secret Manager secret (optional)
+      <input name="gcp_secret_name" placeholder="projects/PROJECT/secrets/NAME/versions/latest" />
+    </label>
+    <label>
+      <input type="checkbox" name="push" checked /> Push after build
+    </label>
+    <label>
+      <input type="checkbox" name="dry_run" /> Dry run (no real docker/git calls)
+    </label>
+    <button type="submit">Start build</button>
+  </form>
+
+  <h2>Jobs</h2>
+  <div id="jobs"></div>
+
+  <script>
+    const form = document.getElementById('buildForm');
+    const jobsDiv = document.getElementById('jobs');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const data = new FormData(form);
+      const payload = {
+        repo_url: data.get('repo_url'),
+        branch: data.get('branch') || 'main',
+        tag: data.get('tag'),
+        registry: data.get('registry'),
+        dockerfile_path: data.get('dockerfile_path') || '',
+        registry_username: data.get('registry_username') || null,
+        registry_password: data.get('registry_password') || null,
+        gcp_secret_name: data.get('gcp_secret_name') || null,
+        push: data.get('push') !== null ? data.get('push')!=='' : true,
+        dry_run: data.get('dry_run') !== null ? data.get('dry_run')!=='' : false,
+      };
+
+      const res = await fetch('/api/build', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const js = await res.json();
+      addJob(js.id);
+    });
+
+    function addJob(id) {
+      const el = document.createElement('div');
+      el.className = 'job';
+      el.id = 'job-' + id;
+      el.innerHTML = `<strong>Job ${id}</strong><pre id="logs-${id}">queued...</pre>`;
+      jobsDiv.prepend(el);
+      pollJob(id);
+    }
+
+    async function pollJob(id) {
+      const logsEl = document.getElementById('logs-' + id);
+      let lastLen = 0;
+      const iv = setInterval(async () => {
+        const res = await fetch('/api/build/' + id);
+        if (!res.ok) { logsEl.textContent += '\nfailed to fetch job'; clearInterval(iv); return }
+        const js = await res.json();
+        logsEl.textContent = js.logs.join('\n');
+        if (js.state === 'done' || js.state === 'error') { clearInterval(iv); }
+        logsEl.scrollTop = logsEl.scrollHeight;
+      }, 1000);
+    }
+  </script>
+</body>
+</html>

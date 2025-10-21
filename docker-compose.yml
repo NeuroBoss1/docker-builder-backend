@@ -1,0 +1,70 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/app:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+      # bind local secrets folder into the app container (read-only)
+      - ./secrets:/run/secrets:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://redis:6379/0
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - FRONTEND_REDIRECT=${FRONTEND_REDIRECT:-http://localhost:3000/oauth_google_callback}
+      # path inside container where your service account JSON may be mounted
+      - GCP_SA_KEY_PATH=/run/secrets/docker-puller-key.json
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    command: ["sh", "-c", "rq worker -u \"$$REDIS_URL\" default"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - GCP_SA_KEY_PATH=/run/secrets/docker-puller-key.json
+    volumes:
+      - ./:/app:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./secrets:/run/secrets:ro
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+  dind:
+    image: docker:24-dind
+    privileged: true
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    volumes:
+      - dind-data:/var/lib/docker
+    command: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+
+  frontend:
+    image: node:18-alpine
+    working_dir: /app/frontend
+    volumes:
+      - ./frontend:/app/frontend:rw
+      - /app/frontend/node_modules
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "3000:3000"
+    environment:
+      - DOCKER=1
+      - CHOKIDAR_USEPOLLING=true
+      - VITE_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+    depends_on:
+      - app
+
+volumes:
+  dind-data:
+    name: docker_builder_dind_data
+  redis-data:
+    name: docker_builder_redis_data
