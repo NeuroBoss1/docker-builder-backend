@@ -57,7 +57,7 @@ services:
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
     # Host port for frontend is configurable via .env as FRONTEND_PORT (defaults to 3000)
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "${FRONTEND_PORT:-3333}:3000"
     environment:
       - DOCKER=1
       - CHOKIDAR_USEPOLLING=true

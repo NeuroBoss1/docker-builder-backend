@@ -1,0 +1,6 @@
+# Configure host ports for services when using docker-compose (optional)
+# APP_PORT: host port mapped to the backend FastAPI app (container port 8000)
+# FRONTEND_PORT: host port mapped to the frontend dev server (container port 3000)
+# Example: APP_PORT=8080
+APP_PORT=8888
+FRONTEND_PORT=3333
