@@ -5,6 +5,8 @@ import Creds from './components/Creds'
 import History from './components/History'
 import Registry from './components/Registry'
 import Profile from './components/Profile'
+import ServicesImages from './components/ServicesImages'
+import Queue from './components/Queue'
 
 export default function App() {
   const [route, setRoute] = useState(window.location.hash || '#/')
@@ -43,6 +45,18 @@ export default function App() {
           style={{display: 'flex', alignItems: 'center', gap: '6px'}}
         >
           📦 Registry
+        </button>
+        <button
+          onClick={() => window.location.hash = '/services'}
+          style={{display: 'flex', alignItems: 'center', gap: '6px'}}
+        >
+          🧩 Services
+        </button>
+        <button
+          onClick={() => window.location.hash = '/queue'}
+          style={{display: 'flex', alignItems: 'center', gap: '6px'}}
+        >
+          🛰️ Queue
         </button>
         <button
           onClick={() => window.location.hash = '/profile'}
@@ -90,6 +104,37 @@ export default function App() {
         <main style={{display: 'flex', justifyContent: 'center', padding: '20px'}}>
           <div style={{maxWidth: '1000px', width: '100%'}}>
             <Registry />
+          </div>
+        </main>
+      </div>
+    )
+  }
+
+  // Route to Services page
+  if (route === '#/services') {
+    return (
+      <div className="container">
+        <NavHeader />
+        <main style={{display: 'flex', justifyContent: 'center', padding: '20px'}}>
+          <div style={{maxWidth: '1000px', width: '100%'}}>
+            <ServicesImages />
+          </div>
+        </main>
+      </div>
+    )
+  }
+
+  // Route to Queue page (support optional job id: '#/queue/<id>')
+  if (route.startsWith('#/queue')) {
+    // attempt to extract job id from hash like '#/queue/<id>'
+    const m = route.match(/^#\/queue\/(.+)$/)
+    const selectedJobId = m ? m[1] : null
+    return (
+      <div className="container">
+        <NavHeader />
+        <main style={{display: 'flex', justifyContent: 'center', padding: '20px'}}>
+          <div style={{maxWidth: '1200px', width: '100%'}}>
+            <Queue selectedJobId={selectedJobId} />
           </div>
         </main>
       </div>

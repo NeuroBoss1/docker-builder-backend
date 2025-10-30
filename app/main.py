@@ -4,7 +4,43 @@ import os
 import json
 from typing import Dict, Optional, Any
 
-from fastapi import FastAPI, HTTPException, Request
+# Load environment file from repo root (named `env`) so os.environ populated when app starts.
+# Uses python-dotenv if available; otherwise falls back to default env vars.
+_env_path = None
+try:
+    from dotenv import load_dotenv
+    from pathlib import Path
+    # project root is parent of `app` dir
+    _proj_root = Path(__file__).resolve().parent.parent
+    _env_path = _proj_root / 'env'
+    if _env_path.exists():
+        load_dotenv(_env_path)
+    else:
+        # fallback: try to load default .env if present
+        load_dotenv()
+except Exception:
+    # python-dotenv not installed or failed to load; proceed, relying on existing env
+    _env_path = None
+    pass
+
+# Emit a small log/print so it's easy to verify env loading when running uvicorn
+try:
+    import logging
+    _logger = logging.getLogger("app.env")
+    if _env_path and _env_path.exists():
+        _logger.info(f"Loaded env file: {_env_path}")
+    else:
+        _logger.info("No env file loaded via python-dotenv (relying on process env vars)")
+    # also log a key variable
+    _logger.info(f"REDIS_URL={os.environ.get('REDIS_URL')}")
+except Exception:
+    # best-effort logging only
+    try:
+        print(f"REDIS_URL={os.environ.get('REDIS_URL')}")
+    except Exception:
+        pass
+
+from fastapi import FastAPI, HTTPException, Request, Body
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -59,7 +95,7 @@ app.add_middleware(
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev_jwt_secret_change_me")
 JWT_ALG = "HS256"
 REDIS_URL = os.environ.get('REDIS_URL')
-
+PORT_APP = os.environ.get('PORT_APP', 8998)
 # RQ queue (None if not available)
 _queue = None
 if redis_sync is not None and Queue is not None and REDIS_URL:
@@ -71,10 +107,42 @@ if redis_sync is not None and Queue is not None and REDIS_URL:
 
 # redis async client for user data (optional)
 _aredis_client = None
-if REDIS_URL and aioredis is not None:
+
+# We'll initialize the async redis client on application startup so we can
+# perform an async ping and log detailed errors if initialization fails.
+
+
+@app.on_event("startup")
+async def init_async_redis():
+    global _aredis_client
+    import logging
+    logger = logging.getLogger("app.init")
+    if not REDIS_URL:
+        logger.info("REDIS_URL not configured; async redis client will not be initialized")
+        _aredis_client = None
+        return
+    if aioredis is None:
+        logger.info("redis.asyncio not available; async redis client will not be initialized")
+        _aredis_client = None
+        return
+
     try:
-        _aredis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
-    except Exception:
+        # Create client and try a quick ping to validate connectivity
+        client = aioredis.from_url(REDIS_URL, decode_responses=True)
+        try:
+            # ping to ensure connection works (may raise)
+            pong = await client.ping()
+            logger.info(f"Connected to Redis at {REDIS_URL}; ping returned: {pong}")
+            _aredis_client = client
+        except Exception as e:
+            logger.exception(f"Failed to ping Redis at {REDIS_URL}: {e}")
+            try:
+                await client.close()
+            except Exception:
+                pass
+            _aredis_client = None
+    except Exception as e:
+        logger.exception(f"Failed to initialize async Redis client from {REDIS_URL}: {e}")
         _aredis_client = None
 
 # store and builder instances
@@ -123,6 +191,59 @@ def _normalize_registry_url(url: str) -> str:
         return u
     except Exception:
         return url
+
+
+def _sanitize_image_string(img: str) -> str:
+    """Sanitize a single image string by removing duplicated trailing path segments.
+    Rules:
+    - Preserve tag which is the last ':' after the final '/'. This avoids confusing registry ports (e.g. localhost:5000/repo:tag).
+    - Split the path (without tag) by '/'. If the last L segments repeat immediately before them (pattern ... X Y X Y), remove the earlier duplicate block.
+    - Return cleaned_path[:]/tag if present.
+    """
+    try:
+        if not img or not isinstance(img, str):
+            return img
+
+        # Find tag: a ':' that occurs after the last '/' marks the tag separator.
+        last_slash = img.rfind('/')
+        last_colon = img.rfind(':')
+        if last_colon > last_slash:
+            path = img[:last_colon]
+            tag = img[last_colon+1:]
+        else:
+            path = img
+            tag = ''
+
+        parts = [p for p in path.split('/') if p != '']
+        if not parts:
+            return f"{path}:{tag}" if tag else path
+
+        # Heuristic: look for a repeating tail: parts[-L:] == parts[-2L:-L]
+        for L in range(len(parts)//2, 0, -1):
+            if len(parts) >= 2*L and parts[-L:] == parts[-2*L:-L]:
+                parts = parts[:-L]
+                break
+
+        cleaned = '/'.join(parts)
+        return f"{cleaned}:{tag}" if tag else cleaned
+    except Exception:
+        return img
+
+
+def _sanitize_mappings_map(mappings: dict) -> dict:
+    """Return a new dict of mappings with image strings sanitized.
+    Non-string values are preserved unchanged.
+    If mappings is falsy or not a dict, returns an empty dict.
+    """
+    if not mappings or not isinstance(mappings, dict):
+        return {}
+    out = {}
+    for k, v in mappings.items():
+        if isinstance(v, str):
+            out[k] = _sanitize_image_string(v)
+        else:
+            out[k] = v
+    return out
 
 
 class CreateBuildPayload(BaseModel):
@@ -1172,6 +1293,75 @@ async def _run_build(req: BuildRequest):
         await store.append_log(req.id, str(e))
 
 
+# Provide an async in-process deploy runner used when RQ is not available.
+async def _run_deploy(job_id: str, mappings: dict, user_sub: str):
+    """Run ansible-playbook with mappings passed as --extra-vars (JSON). Writes logs to store."""
+    await store.set_state(job_id, "running")
+    try:
+        # wrap mappings under key 'mappings' so playbook can reference {{ mappings }}
+        extra_vars = json.dumps({'mappings': mappings})
+
+        # Find playbook path - prefer ./deploy/playbook.yml or ./playbook.yml
+        candidates = [
+            os.path.join(os.getcwd(), 'deploy', 'playbook.yml'),
+            os.path.join(os.getcwd(), 'playbook.yml'),
+            os.path.join(os.path.dirname(__file__), '..', 'deploy', 'playbook.yml')
+        ]
+        playbook = None
+        for c in candidates:
+            try:
+                if os.path.exists(c):
+                    playbook = c
+                    break
+            except Exception:
+                pass
+
+        if not playbook:
+            msg = 'No ansible playbook found (searched deploy/playbook.yml, playbook.yml)'
+            await store.append_log(job_id, msg)
+            await store.set_state(job_id, 'error')
+            return
+
+        # Run ansible-playbook locally
+        cmd = [
+            'ansible-playbook',
+            playbook,
+            '-i', 'localhost,',
+            '--connection', 'local',
+            '--extra-vars', extra_vars
+        ]
+
+        env = os.environ.copy()
+        # Pass user_sub as env var for playbook to use if needed
+        env['DEPLOY_USER_SUB'] = user_sub
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env
+        )
+
+        assert proc.stdout is not None
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode(errors='replace').rstrip()
+            await store.append_log(job_id, text)
+
+        rc = await proc.wait()
+        if rc == 0:
+            await store.set_state(job_id, 'done')
+        else:
+            await store.set_state(job_id, 'error')
+            await store.append_log(job_id, f'ansible-playbook exited with code {rc}')
+
+    except Exception as e:
+        await store.set_state(job_id, 'error')
+        await store.append_log(job_id, str(e))
+
+
 @app.get("/api/build/{job_id}")
 async def get_build(job_id: str):
     job = await store.get_job(job_id)
@@ -1192,6 +1382,139 @@ async def index():
         return HTMLResponse('<html><body><h1>Docker Builder</h1><p>No template found.</p></body></html>')
     with open(tmpl, "r", encoding="utf-8") as f:
         return HTMLResponse(f.read())
+
+class MappingsPayload(BaseModel):
+    mappings: dict
+
+@app.get("/api/service-image-mapping")
+async def get_service_mappings(request: Request):
+    info = await _get_user_from_request(request)
+    if not info or not info.get('sub'):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    sub = info['sub']
+    if _aredis_client is None:
+        raise HTTPException(status_code=500, detail="Redis not configured")
+
+    data = await _aredis_client.get(f"user:{sub}:service_mappings")
+    if not data:
+        return {"mappings": {}}
+    try:
+        return {"mappings": json.loads(data)}
+    except Exception:
+        return {"mappings": {}}
+
+
+
+@app.post("/api/service-image-mapping")
+async def save_service_mappings(payload: MappingsPayload, request: Request):
+    info = await _get_user_from_request(request)
+    if not info or not info.get('sub'):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    sub = info['sub']
+    if _aredis_client is None:
+        raise HTTPException(status_code=500, detail="Redis not configured")
+    try:
+        # sanitize mappings before saving to avoid duplicated path segments
+        cleaned = _sanitize_mappings_map(payload.mappings)
+        await _aredis_client.set(f"user:{sub}:service_mappings", json.dumps(cleaned))
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# New endpoint: deploy services using selected tags (runs ansible-playbook in background)
+@app.post("/api/deploy-services")
+async def deploy_services(payload: dict = Body(...), request: Request = None):
+    """Start deployment: accept mappings { serviceId: "registry/repo:tag" } and run ansible-playbook with these values as extra-vars."""
+    info = await _get_user_from_request(request)
+    if not info or not info.get('sub'):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    sub = info['sub']
+
+    # validate payload and extract mappings
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object containing 'mappings')")
+    mappings = payload.get('mappings')
+    if mappings is None or not isinstance(mappings, dict):
+        raise HTTPException(status_code=422, detail="Missing or invalid 'mappings' object in request body")
+
+    # sanitize mappings
+    try:
+        mappings = _sanitize_mappings_map(mappings)
+    except Exception:
+        pass
+
+    job_id = str(uuid.uuid4())
+    # create job in store
+    await store.create_job(job_id, "queued", [])
+
+    # store in redis for visibility if available
+    if _aredis_client is not None:
+        try:
+            await _aredis_client.hset(f"deploy:{job_id}", mapping={"mappings": json.dumps(mappings), "user": sub})
+        except Exception:
+            pass
+
+    # Try to enqueue via RQ if available
+    if _queue is not None:
+        try:
+            _queue.enqueue('app.worker.process_deploy', job_id, mappings, job_timeout=3600)
+            try:
+                await store.append_log(job_id, "Enqueued to RQ (app.worker.process_deploy)")
+            except Exception:
+                pass
+            return {"id": job_id, "enqueued": True}
+        except Exception as e:
+            try:
+                await store.append_log(job_id, f"Failed to enqueue to RQ: {e}; falling back to in-process run")
+            except Exception:
+                pass
+
+    # fallback: run in-process
+    try:
+        await store.append_log(job_id, "Running deploy in-process (no RQ available)")
+    except Exception:
+        pass
+    # run the async in-process deploy coroutine (_run_deploy) in background
+    asyncio.create_task(_run_deploy(job_id, mappings, sub))
+    return {"id": job_id, "enqueued": False}
+
+
+# DEBUG endpoint to inspect runtime flags helpful for diagnosing RQ/Redis issues
+@app.get("/api/_debug")
+async def _debug_info():
+    """Return basic runtime debug info: REDIS_URL, whether RQ queue object exists, and availability of redis clients."""
+    try:
+        queue_conn = None
+        queue_info = None
+        try:
+            if _queue is not None:
+                queue_info = {
+                    'queue_class': type(_queue).__name__,
+                }
+                try:
+                    # rq.Queue has 'connection' attr
+                    conn = getattr(_queue, 'connection', None)
+                    if conn is not None:
+                        queue_info['connection_repr'] = repr(conn)
+                except Exception:
+                    pass
+        except Exception:
+            queue_info = str(_queue)
+
+        store_type = type(store).__name__ if 'store' in globals() else 'unknown'
+
+        return {
+            "REDIS_URL": REDIS_URL,
+            "queue_configured": _queue is not None,
+            "redis_sync_available": redis_sync is not None,
+            "redis_async_available": aioredis is not None,
+            "rq_available": Queue is not None,
+            "store_type": store_type,
+            "queue_info": queue_info,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # serve static files if present
