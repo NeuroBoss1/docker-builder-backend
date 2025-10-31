@@ -72,13 +72,85 @@ class RedisJobStore(JobStore):
 
     async def append_log(self, job_id: str, line: str) -> None:
         key = f"job:{job_id}"
-        raw = await self._redis.hget(key, "logs")
+        raw = None
         try:
-            logs = json.loads(raw) if raw else []
+            # hget might return bytes or str depending on client config
+            raw = await self._redis.hget(key, "logs")
+        except Exception:
+            raw = None
+
+        logs = []
+        # Try to robustly detect and parse existing logs value
+        try:
+            if raw is None:
+                logs = []
+            else:
+                # If bytes, keep bytes for detection
+                if isinstance(raw, (bytes, bytearray)):
+                    b = bytes(raw)
+                elif isinstance(raw, str):
+                    # If string contains binary-looking characters, try to treat as bytes
+                    try:
+                        # attempt direct json parse first
+                        logs = json.loads(raw)
+                    except Exception:
+                        # fallback: decode as latin-1 to preserve bytes, then try gzip/zlib
+                        b = raw.encode('latin-1')
+                else:
+                    # unknown type - coerce to string
+                    try:
+                        logs = json.loads(str(raw))
+                    except Exception:
+                        b = str(raw).encode('utf-8', errors='replace')
+
+                # If logs not filled yet and we have bytes, analyze bytes
+                if logs == [] and 'b' in locals():
+                    # detect gzip
+                    try:
+                        import gzip, zlib
+                        if len(b) >= 2 and b[0] == 0x1f and b[1] == 0x8b:
+                            # gzip
+                            try:
+                                decompressed = gzip.decompress(b)
+                                logs = json.loads(decompressed.decode('utf-8', errors='replace'))
+                            except Exception:
+                                # fallback to decode as text
+                                logs = [decompressed.decode('utf-8', errors='replace')] if 'decompressed' in locals() else []
+                        else:
+                            # try zlib decompress (common for some clients)
+                            try:
+                                decompressed = zlib.decompress(b)
+                                logs = json.loads(decompressed.decode('utf-8', errors='replace'))
+                            except Exception:
+                                # not compressed JSON, try to parse raw bytes as utf-8 JSON
+                                try:
+                                    logs = json.loads(b.decode('utf-8', errors='replace'))
+                                except Exception:
+                                    # fallback: treat as single log line string
+                                    logs = [b.decode('utf-8', errors='replace')]
+                    except Exception:
+                        # any failure -> fallback
+                        try:
+                            logs = json.loads(raw.decode() if hasattr(raw, 'decode') else str(raw))
+                        except Exception:
+                            logs = [str(raw)]
         except Exception:
             logs = []
+
+        # Ensure logs is a list
+        if not isinstance(logs, list):
+            logs = [str(logs)]
+
+        # Append new line and persist
         logs.append(line)
-        await self._redis.hset(key, "logs", json.dumps(logs))
+        try:
+            await self._redis.hset(key, "logs", json.dumps(logs))
+        except Exception:
+            # last resort: set as plain string
+            try:
+                await self._redis.hset(key, "logs", json.dumps([str(l) for l in logs]))
+            except Exception:
+                pass
 
     async def get_job(self, job_id: str) -> Optional[Dict]:
         key = f"job:{job_id}"
@@ -109,4 +181,3 @@ def get_job_store(redis_url: Optional[str] = None) -> JobStore:
         except Exception:
             return InMemoryJobStore()
     return InMemoryJobStore()
-

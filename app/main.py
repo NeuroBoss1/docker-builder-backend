@@ -1517,6 +1517,205 @@ async def _debug_info():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# --- helper functions for re-enqueueing ---
+
+def _decode_redis_value(val):
+    """Decode a Redis value which may be bytes or string. Return None for falsy values."""
+    if val is None:
+        return None
+    try:
+        if isinstance(val, bytes):
+            return val.decode('utf-8')
+        return val
+    except Exception:
+        return val
+
+
+def _get_sync_redis_client():
+    """Return a sync redis client (redis-py) if available and REDIS_URL set, otherwise None."""
+    try:
+        if redis_sync is None or not REDIS_URL:
+            return None
+        # create a new client instance to avoid mutating global connection state
+        return redis_sync.from_url(REDIS_URL)
+    except Exception:
+        return None
+
+
+@app.post('/api/queue/reenqueue')
+async def reenque_all_jobs(request: Request, force: bool = False):
+    """Re-enqueue all jobs found in Redis set `jobs:ids` that have deploy metadata.
+    Returns lists of requeued ids, skipped ids (with reason) and errors.
+    """
+    info = await _get_user_from_request(request)
+    if not info or not info.get('sub'):
+        raise HTTPException(status_code=401, detail='Unauthorized')
+
+    # require Redis sync client available
+    r = _get_sync_redis_client()
+    if r is None:
+        raise HTTPException(status_code=500, detail='Redis sync client not configured')
+
+    try:
+        raw_jobs = r.smembers('jobs:ids') or set()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'Failed to read jobs: {e}')
+
+    jobs = []
+    for j in raw_jobs:
+        try:
+            if isinstance(j, bytes):
+                jobs.append(j.decode())
+            else:
+                jobs.append(str(j))
+        except Exception:
+            jobs.append(str(j))
+
+    requeued = []
+    skipped = []
+    errors = []
+
+    # prepare queue object
+    q = None
+    try:
+        if _queue is not None:
+            q = _queue
+        else:
+            # create local Queue using redis client
+            from rq import Queue as _RQQueue
+            q = _RQQueue(connection=r)
+    except Exception:
+        q = None
+
+    for jid in sorted(jobs):
+        deploy_key = f'deploy:{jid}'
+        try:
+            if not r.exists(deploy_key):
+                skipped.append({'id': jid, 'reason': 'no deploy metadata'})
+                continue
+            mappings_raw = r.hget(deploy_key, 'mappings')
+            mappings_raw = _decode_redis_value(mappings_raw)
+            if not mappings_raw:
+                skipped.append({'id': jid, 'reason': 'no mappings field'})
+                continue
+            try:
+                mappings = json.loads(mappings_raw)
+            except Exception as e:
+                errors.append({'id': jid, 'error': f'invalid mappings JSON: {e}'})
+                continue
+
+            # If not forcing, skip jobs that are already done to avoid overwriting final state
+            try:
+                if not force:
+                    try:
+                        existing = await store.get_job(jid)
+                        if existing and existing.get('state') == 'done':
+                            skipped.append({'id': jid, 'reason': 'already done'})
+                            continue
+                    except Exception:
+                        pass
+
+            except Exception:
+                pass
+
+            # enqueue
+            try:
+                if q is None:
+                    errors.append({'id': jid, 'error': 'RQ not available'})
+                    continue
+
+                # IMPORTANT: set job state to 'queued' in the job store BEFORE enqueueing.
+                # If the worker executes very quickly and sets state to 'done', a subsequent
+                # set_state('queued') after enqueue would incorrectly overwrite the final state.
+                try:
+                    await store.set_state(jid, 'queued')
+                except Exception:
+                    pass
+
+                q.enqueue('app.worker.process_deploy', jid, mappings, job_timeout=3600)
+
+                # record enqueue action in job logs so UI/worker can show what happened
+                try:
+                    await store.append_log(jid, 'Re-enqueued via UI')
+                except Exception:
+                    pass
+
+                requeued.append(jid)
+            except Exception as e:
+                errors.append({'id': jid, 'error': str(e)})
+        except Exception as e:
+            errors.append({'id': jid, 'error': str(e)})
+
+    return {
+        'requeued': requeued,
+        'skipped': skipped,
+        'errors': errors,
+        'count': {'found': len(jobs), 'requeued': len(requeued), 'skipped': len(skipped), 'errors': len(errors)}
+    }
+
+
+@app.post('/api/queue/reenqueue/{job_id}')
+async def reenque_job(job_id: str, request: Request, force: bool = False):
+    """Re-enqueue a specific job id if deploy metadata available."""
+    info = await _get_user_from_request(request)
+    if not info or not info.get('sub'):
+        raise HTTPException(status_code=401, detail='Unauthorized')
+
+    r = _get_sync_redis_client()
+    if r is None:
+        raise HTTPException(status_code=500, detail='Redis sync client not configured')
+
+    deploy_key = f'deploy:{job_id}'
+    try:
+        if not r.exists(deploy_key):
+            return {'ok': False, 'reason': 'no deploy metadata'}
+        mappings_raw = r.hget(deploy_key, 'mappings')
+        mappings_raw = _decode_redis_value(mappings_raw)
+        if not mappings_raw:
+            return {'ok': False, 'reason': 'no mappings field'}
+        try:
+            mappings = json.loads(mappings_raw)
+        except Exception as e:
+            return {'ok': False, 'reason': f'invalid mappings JSON: {e}'}
+
+        # prepare queue
+        q = None
+        try:
+            if _queue is not None:
+                q = _queue
+            else:
+                from rq import Queue as _RQQueue
+                q = _RQQueue(connection=r)
+        except Exception:
+            q = None
+
+        # If not forcing, skip re-enqueue when job already done to avoid overwriting final state.
+        if not force:
+            try:
+                existing = await store.get_job(job_id)
+                if existing and existing.get('state') == 'done':
+                    return {'ok': False, 'reason': 'already done'}
+            except Exception:
+                pass
+
+        # IMPORTANT: set job state to 'queued' BEFORE enqueueing to avoid overwriting a
+        # 'done' state if the worker runs very quickly.
+        try:
+            await store.set_state(job_id, 'queued')
+        except Exception:
+            pass
+
+        q.enqueue('app.worker.process_deploy', job_id, mappings, job_timeout=3600)
+         try:
+             await store.append_log(job_id, 'Re-enqueued via UI')
+         except Exception:
+             pass
+
+         return {'ok': True, 'id': job_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # serve static files if present
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(static_dir):

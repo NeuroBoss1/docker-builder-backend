@@ -31,6 +31,11 @@ export default function Queue({ selectedJobId = null }) {
   const logsRef = useRef(null)
   const pollRef = useRef(null)
 
+  // Re-enqueue state
+  const [reenqueueing, setReenqueueing] = useState(false)
+  const [reenqueueResult, setReenqueueResult] = useState(null)
+  const [perJobReenqueueing, setPerJobReenqueueing] = useState({})
+
   useEffect(() => {
     // if prop selectedJobId is provided or changes, set selected
     if (selectedJobId) {
@@ -128,12 +133,126 @@ export default function Queue({ selectedJobId = null }) {
     return '#999'
   }
 
+  // Re-enqueue all jobs
+  const reenqueAll = async () => {
+    setReenqueueResult(null)
+    setReenqueueing(true)
+    try {
+      const r = await api.post('/queue/reenqueue')
+      console.debug('reenqueAll response:', r)
+      const payload = (r && typeof r.data !== 'undefined') ? r.data : { status: r && r.status, statusText: r && r.statusText }
+      // set state and also alert for immediate visibility during debugging
+      setReenqueueResult(payload || {})
+      try { window.alert('Re-enqueue response:\n' + JSON.stringify(payload, null, 2)) } catch (e) {}
+    } catch (e) {
+      console.error('reenqueAll error:', e)
+      const errPayload = e?.response?.data ?? { error: e.message }
+      setReenqueueResult(errPayload)
+      try { window.alert('Re-enqueue error:\n' + JSON.stringify(errPayload, null, 2)) } catch (err) {}
+    } finally {
+      setReenqueueing(false)
+    }
+  }
+
+  const reenqueJob = async (jobId) => {
+    setPerJobReenqueueing(prev => ({ ...prev, [jobId]: true }))
+    try {
+      const r = await api.post(`/queue/reenqueue/${jobId}`)
+      console.debug('reenqueJob response:', r)
+      const payload = (r && typeof r.data !== 'undefined') ? r.data : { status: r && r.status, statusText: r && r.statusText }
+      setReenqueueResult(prev => ({ ...(prev||{}), perJob: { id: jobId, result: payload } }))
+      try { window.alert('Re-enqueue (job) response:\n' + JSON.stringify(payload, null, 2)) } catch (e) {}
+    } catch (e) {
+      console.error('reenqueJob error:', e)
+      const errPayload = e?.response?.data ?? { error: e.message }
+      setReenqueueResult(prev => ({ ...(prev||{}), perJob: { id: jobId, result: errPayload } }))
+      try { window.alert('Re-enqueue (job) error:\n' + JSON.stringify(errPayload, null, 2)) } catch (err) {}
+    } finally {
+      setPerJobReenqueueing(prev => ({ ...prev, [jobId]: false }))
+    }
+  }
+
   return (
     <div className="container">
       <header style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
         <h1>🛰️ Queue</h1>
-        <div style={{fontSize:13,color:'#666'}}>Auto-refresh every 3s • Select a job to see logs</div>
+        <div style={{display:'flex', gap:12, alignItems:'center'}}>
+          <div style={{fontSize:13,color:'#666'}}>Auto-refresh every 3s • Select a job to see logs</div>
+          <button onClick={reenqueAll} disabled={reenqueueing} style={{padding:'8px 12px', borderRadius:8, background: reenqueueing ? '#ccc' : '#1976d2', color:'white', border:'none', cursor: reenqueueing ? 'wait' : 'pointer'}}>
+            {reenqueueing ? 'Re-enqueueing...' : 'Re-enqueue all'}
+          </button>
+        </div>
       </header>
+
+      {reenqueueResult && (
+        <div style={{marginTop:12}}>
+          <div className="card">
+            <strong>Re-enqueue results</strong>
+            <div style={{marginTop:8}}>
+              {/* DEBUG: always show raw response */}
+              <div style={{marginBottom:8}}>
+                <div style={{fontWeight:700}}>Response (raw):</div>
+                <pre style={{whiteSpace:'pre-wrap', marginTop:6, background:'#f7f7f7', padding:8, borderRadius:6}}>{JSON.stringify(reenqueueResult, null, 2)}</pre>
+              </div>
+
+              {/* show explicit error if present */}
+              {reenqueueResult.error && <div style={{color:'red', marginBottom:8}}>Error: {String(reenqueueResult.error)}</div>}
+
+              {/* typical structured result */}
+              {reenqueueResult.count && (
+                <div style={{marginBottom:8}}>
+                  Found: {reenqueueResult.count.found} • Requeued: {reenqueueResult.count.requeued} • Skipped: {reenqueueResult.count.skipped} • Errors: {reenqueueResult.count.errors}
+                </div>
+              )}
+
+              {reenqueueResult.requeued && reenqueueResult.requeued.length > 0 && (
+                <div style={{marginBottom:8}}>
+                  <div style={{fontWeight:700}}>Requeued:</div>
+                  <div style={{display:'flex', gap:8, flexWrap:'wrap'}}>
+                    {reenqueueResult.requeued.map(id => <div key={id} style={{padding:'6px 8px', background:'#eef', borderRadius:6}}>{id.slice(0,8)}</div>)}
+                  </div>
+                </div>
+              )}
+
+              {reenqueueResult.skipped && reenqueueResult.skipped.length > 0 && (
+                <div style={{marginBottom:8}}>
+                  <div style={{fontWeight:700}}>Skipped:</div>
+                  <ul>
+                    {reenqueueResult.skipped.map(s => <li key={s.id}>{s.id.slice(0,8)} — {s.reason}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {reenqueueResult.errors && reenqueueResult.errors.length > 0 && (
+                <div style={{marginBottom:8}}>
+                  <div style={{fontWeight:700}}>Errors:</div>
+                  <ul>
+                    {reenqueueResult.errors.map(e => <li key={e.id}>{e.id}: {e.error}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {/* per-job result if present */}
+              {reenqueueResult.perJob && (
+                <div style={{marginTop:6}}>
+                  <div style={{fontWeight:700}}>Per-job result ({(reenqueueResult.perJob.id||'') .slice ? reenqueueResult.perJob.id.slice(0,8) : ''}):</div>
+                  <pre style={{whiteSpace:'pre-wrap', marginTop:6, background:'#f7f7f7', padding:8, borderRadius:6}}>{JSON.stringify(reenqueueResult.perJob.result, null, 2)}</pre>
+                </div>
+              )}
+
+              {/* fallback: show raw JSON if nothing matched */}
+              {(!reenqueueResult.count && !reenqueueResult.requeued && !reenqueueResult.perJob && !reenqueueResult.error) && (
+                <div style={{marginTop:8}}>
+                  <div style={{fontWeight:700}}>Raw response:</div>
+                  <pre style={{whiteSpace:'pre-wrap', marginTop:6, background:'#f7f7f7', padding:8, borderRadius:6}}>{JSON.stringify(reenqueueResult, null, 2)}</pre>
+                </div>
+              )}
+
+              <div style={{marginTop:8, fontSize:12, color:'#666'}}>Updated: {new Date().toLocaleString()}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main style={{display:'flex', gap:'20px', paddingTop:12}}>
         <section style={{flex:'0 0 380px'}}>
@@ -155,6 +274,16 @@ export default function Queue({ selectedJobId = null }) {
                       {job.progress !== undefined && job.progress !== null ? `Progress: ${job.progress}% • ` : ''}Logs: {(job.logs && job.logs.length) || 0}
                     </div>
                   </div>
+
+                  <div style={{display:'flex', flexDirection:'column', gap:8}}>
+                    <button title="Re-enqueue this job" onClick={(e) => { e.stopPropagation(); reenqueJob(job.id) }} disabled={!!perJobReenqueueing[job.id]} style={{minWidth:90, padding:'6px 12px', borderRadius:6, border:'1px solid #ddd', background:'#fff', color: '#111', cursor:'pointer', boxShadow: 'inset 0 -1px 0 rgba(0,0,0,0.02)', fontWeight:600, textAlign:'center'}}>
+                      {perJobReenqueueing[job.id]
+                        ? <span className="spinner" style={{width:14, height:14, borderWidth:2, display:'inline-block', verticalAlign:'middle'}} />
+                        : 'Re-enqueue'
+                      }
+                    </button>
+                  </div>
+
                 </div>
               ))}
             </div>
