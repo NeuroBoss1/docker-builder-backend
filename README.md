@@ -281,15 +281,4 @@ source venv/bin/activate
 pip install -r requirements.txt
 pytest -q
 ```
-
 ---
-
-## Дальше, что можно улучшить
-
-- UI: страница Services с выбором TAG для каждого сервиса (Neuroboss / Agent / Rag) и аккуратная кнопка `Deploy`.
-- Улучшенная визуализация очереди: прогрессбар, стрим логов, авто-переход на страницу Queue после Deploy.
-- Добавить поле `rq_job_id` в job-хэш для лёгкой трассировки между RQ и нашими метаданными.
-
----
-
-Автор: psychopanda
