@@ -1,202 +1,295 @@
 # Docker Builder Service
 
-Небольшое приложение на FastAPI для клонирования репозитория, сборки Docker-образа и опциональной отправки в реестр.
+Лёгкий сервис на FastAPI для автоматизации сборки Docker-образов и их деплоя.
 
-Цель этого репозитория — предоставить HTTP API для автоматической сборки образов. Этот README объясняет, как контейнеризовать и запускать сервис, а также какие нюансы учитывать при том, что само приложение вызывает Docker (git, docker, gcloud и т.п.).
+Это приложение предоставляет HTTP API и минимальный веб-интерфейс для создания задач сборки и деплоя, хранения их состояния и просмотра логов выполнения. Оно пригодно для локальной разработки и как компонент более сложного CI/CD пайплайна.
 
-Коротко о содержимом
+Коротко — что в репозитории
 
-- `app/` — исходники приложения (FastAPI)
-- `tests/` — базовые тесты (используют dry_run)
-- `requirements.txt` — зависимости Python
+- `app/` — исходный код FastAPI-приложения и воркера.
+- `frontend/` — простая веб-обёртка (Vite + React) для управления задачами.
+- `deploy/` — пример ansible playbook и вспомогательные сценарии.
+- `tests/` — базовые тесты.
+- `requirements.txt` — Python-зависимости.
 
-Можно ли запускать приложение в Docker?
+Почему это удобно
 
-Да. Приложение можно упаковать в Docker-образ и запускать в ко��тейнере. Однако приложение само запускает системные команды (`git`, `docker`, опционально `gcloud`), поэтому чтобы оно могло управлять сборкой/пушем образов, нужно предоставить доступ к Docker-демону (или установить и запустить Docker внутри контейнера — Docker-in-Docker).
+- Файлы логов и состояния задач хранятся в Redis (если он настроен) — можно быстро посмотреть историю и логи.
+- Поддерживается очередь RQ: задачи можно ставить в очередь и выполнять отдельными воркерами.
+- При отсутствии Redis/RQ приложение использует in-memory fallback и выполняет задачу в фоне (полезно для простых сценариев и локальной отладки).
 
-Два рекомендуемых варианта:
+Содержание файла
 
-1) Подключение к Docker-демону хоста (рекомендуемое для удобства):
-   - Примонтировать Unix-сокет `/var/run/docker.sock` в контейнер: контейнер использует docker CLI (клиент) и посылает команды демону хоста.
-   - Плюсы: просто, быстро, не требует запуска dind.
-   - Минусы: контейнер получает полномочия демона Docker хоста (высокий уровень доступа).
+- Быстрый старт (локально без Docker)
+- Запуск в Docker
+- API — краткий обзор
+- Jobs / Workers / Queues — как это устроено и где смотреть логи
+- Полезные команды для отладки
 
-2) Docker-in-Docker (dind) через docker-compose (sidecar):
-   - Запустить официальный `docker:dind` сервис и соединить приложение с ним (или использовать его как отдельный ��емон).
-   - Плюсы: изоляция от демона хоста.
-   - Минусы: нужно запускать `privileged` сервис, добавляется сложность и потенциальная накладная на производительность.
+---
 
-Учтите также:
-- `gcloud` (Google Cloud SDK) не установлен в образ по-умолчанию. Если вы хотите использовать `gcloud auth print-access-token` для логина в GCR/Artifact Registry, установите SDK в образ или пробросьте соответствующие учётные данные/токены через секреты/переменные окружения.
-- Для доступа к приватным реестрам рекомендуется использовать безопасную передачу учётных данных (через переменные окружения, Docker secrets, GCP Secret Manager). Не храните пароли в репозитории.
+## Быстрый старт — запустить локально (без Docker)
 
-Что я добавил
+Рекомендуется использовать виртуальное окружение Python:
 
-- `Dockerfile` — образ на базе `python:3.11-slim`, с установкой `git` и `docker` CLI и установкой Python-зависимостей из `requirements.txt`.
-- `docker-compose.yml` — демонстрационный файл с двумя опциями: с примонтированным Docker-сокетом хоста и с сервисом dind (можно использовать по необходимости).
-- `.dockerignore` — чтобы не копировать лишние файлы в образ.
-- `README.md` — этот файл.
+```bash
+cd /home/psychopanda/techops/infra/docker-builder-backend
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
-Как собрать и запустить (локально)
+Запустить сервер разработчика (uvicorn):
 
-1) Собрать образ локально и запустить с примонтированным Docker-сок��том:
+```bash
+source venv/bin/activate
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Если вы хотите, чтобы задачи реально выполнялись асинхронно через очередь RQ, запустите Redis и воркер в отдельном терминале:
+
+```bash
+# запустить redis (на Linux)
+sudo service redis-server start
+# в проекте (venv активирован)
+export REDIS_URL=redis://localhost:6379/0
+venv/bin/rq worker > rq.log 2>&1 &
+tail -f rq.log
+```
+
+Фронтенд (локальная разработка):
+
+```bash
+cd frontend
+npm install
+npm run dev
+# интерфейс по умолчанию будет на http://localhost:3000
+```
+
+Примечание: frontend делает proxy-запросы к `http://127.0.0.1:8000/api`, так что backend должен быть запущен.
+
+---
+
+## Запуск в Docker
+
+Можно упаковать сервис в контейнер. Есть два распространённых подхода:
+
+1) Использовать демон Docker хоста (монтировать `/var/run/docker.sock`). Быстро и удобно для локальной сборки.
+2) Разворачивать вспомогательный сервис Docker-in-Docker (dind) — безопаснее, но сложнее.
+
+Пример (вариант с примонтированным сокетом):
 
 ```bash
 # собрать образ
 docker build -t docker-builder-service .
-
-# запустить контейнер (примеры)
-# Вариант A: использовать Docker хоста (простой)
+# запустить (пробрасываем текущую директорию и сокет)
 docker run --rm -p 8000:8000 -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/app docker-builder-service
-
-# Вариант B: использовать docker-compose (включён сервис dind)
-docker-compose up --build
 ```
 
-2) В контейнере сервис доступен на http://localhost:8000
+Или использовать docker-compose (если в `docker-compose.yml` настроен dind).
 
-API
+---
 
-- POST /api/build — создать задачу сборки. Формат payload совпадает с Pydantic-моделью `CreateBuildPayload` в `app/main.py`.
-- GET /api/build/{job_id} — получить статус и логи
-- GET /api/builds — список задач
+## Кратко про API
 
-Пример payload (JSON):
+- POST /api/build — создать задачу сборки (см. `CreateBuildPayload` в `app/main.py`).
+- POST /api/deploy-services — создать задачу деплоя с `mappings` (service -> image:tag).
+- GET /api/build/{job_id} — получить статус и логи job.
+- GET /api/builds — список job'ов.
+- GET /api/_debug — отладочные флаги сервиса (наличие Redis, RQ и т.д.).
+
+Для быстрой проверке используйте curl или Swagger UI: http://127.0.0.1:8000/docs
+
+---
+
+## Jobs, воркеры и очереди — как всё устроено (понимание и отладка)
+
+Здесь коротко и по делу — где что хранится и как следить за задачами.
+
+- Job: запись о задаче с полями `id`, `state` (queued / running / done / error) и `logs` (JSON-массив строк). Это «источник правды» для UI.
+- Очередь: используется RQ (Redis Queue). Это список заданий, ожидающих своего исполнения воркером.
+- Worker: отдельный процесс (запускается командой `rq worker`), который забирает задачу из очереди и выполняет её, обновляя `job:<id>` через `JobStore`.
+
+Реализация `JobStore`:
+- `InMemoryJobStore` — для локального режима (всё хранится в памяти процесса).
+- `RedisJobStore` — работает через `redis.asyncio` и сохраняет job'ы в Redis.
+
+Структура ключей Redis (если используется Redis):
+- `jobs:ids` — множество всех job id.
+- `job:<JOB_ID>` — hash с `id`, `state`, `logs`.
+- `deploy:<JOB_ID>` — дополнительные метаданные для deploy (mappings, user).
+
+Жизненный цикл задачи:
+1. Клиент создаёт job (POST `/api/build` или `/api/deploy-services`).
+2. Сервис сохраняет job (`state=queued`) и пытается поставить задачу в RQ.
+3. Если enqueue прошёл — задача ждёт воркера; иначе запускается в фоне (fallback).
+4. Воркeр/фоновая задача ставит `state=running`, пишет логи через `append_log` и по завершении ставит `done` или `error`.
+
+Полезно: чтобы не терять историю и логи — запускайте Redis + отдельный RQ worker при разработке.
+
+---
+
+## Где смотреть логи и статус (полезные команды)
+
+```bash
+# список job id
+redis-cli SMEMBERS jobs:ids
+# показать job (включая логи)
+redis-cli HGETALL job:<JOB_ID>
+# показать deploy meta
+redis-cli HGETALL deploy:<JOB_ID>
+# содержимое RQ-очереди
+redis-cli LRANGE rq:queue:default 0 -1
+# tail логов воркера
+tail -f rq.log
+# tail логов uvicorn
+tail -f uvicorn.log
+```
+
+Если в поле `logs` вы видите нечитаемые символы — иногда это значит, что там попали бинарные данные или сжатый поток (gzip/zlib). В репозитории есть рекомендации по диагностике и нормализации таких значений (читайте раздел «Troubleshooting» в этом README).
+
+---
+
+## Troubleshooting — частые проблемы
+
+- Frontend не грузится / нет стилей: проверьте, что backend доступен по `http://127.0.0.1:8000` (vite проксирует запросы к API). Если backend не запущен, фронтенд покажет «голый» HTML.
+- Задачи не попадают в очередь: проверьте `REDIS_URL`, запущен ли Redis и доступен ли он. В `/api/_debug` видна информация о подключении.
+- Воркeр ничего не делает: убедитесь, что воркер запущен в том же окружении (тот же `REDIS_URL`), и смотрите `rq.log`.
+- В `logs` в Redis — непонятные байты: возможно, туда попали бинарные данные. Сделайте бэкап значения, попробуйте распаковать gzip/zlib и сохранить в виде JSON-массива строк. В проекте есть скрипт диагностики, который помогает распознать и нормализовать такие логи.
+
+---
+
+## Как отлаживать ansible playbook и пример payload для `/api/deploy-services`
+
+Ниже — компактная инструкция, которая поможет быстро локально отладить playbook и понять, какие переменные получает Ansible из бекенда.
+
+1) Где искать playbook
+
+- По умолчанию сервис ищет плейбук по пути `./deploy/playbook.yml` или `./playbook.yml` (см. `app/main.py`).
+- Убедитесь, что этот файл существует и что ansible-playbook установлен в вашем окружении.
+
+2) Что именно бекенд передаёт в playbook
+
+- endpoint `/api/deploy-services` формирует JSON с ключом `mappings`, например:
 
 ```json
 {
-  "repo_url": "https://github.com/example/repo.git",
-  "branch": "main",
-  "tag": "v1.0.0",
-  "registry": "example.registry/repo/image",
-  "dockerfile_path": "Dockerfile",
-  "push": true,
-  "dry_run": true
+  "mappings": {
+    "rag-service": "us-central1-docker.pkg.dev/PROJECT/REPO/rag-service:20251025-111006",
+    "neuroboss-service": "us-central1-docker.pkg.dev/PROJECT/REPO/neuroboss-service:20251025-183318",
+    "agent-service": "us-central1-docker.pkg.dev/PROJECT/REPO/agent-service:20251025-184200"
+  }
 }
 ```
 
-Запуск тестов (локально, в venv)
+- В playbook это доступно как переменная `mappings`. Пример: `{{ mappings }}` — это словарь serviceId -> image:tag.
+- Бекенд также устанавливает env var `DEPLOY_USER_SUB` (если пользователь доступен) — можно использовать её внутри playbook.
+
+3) Пример простого тестового `deploy/playbook.yml` (печатает mappings, извлекает TAG и симулирует прогресс 1..100)
+
+```yaml
+- name: Debug deploy mappings
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  tasks:
+    - name: Print received mappings (raw)
+      debug:
+        var: mappings
+
+    - name: Print each service mapping with extracted tag
+      vars:
+        item_list: "{{ mappings | dict2items }}"
+      loop: "{{ item_list }}"
+      loop_control:
+        loop_var: svc
+      debug:
+        msg: "{{ svc.key }} -> image={{ svc.value }} ; tag={{ (svc.value.split(':')[-1]) if ':' in svc.value else 'latest' }}"
+
+    - name: Simulate work and emit progress 1..100
+      loop: "{{ range(1, 101) | list }}"
+      loop_control:
+        label: "progress-{{ item }}"
+      debug:
+        msg: "PROGRESS {{ item }}"
+
+    - name: Final message
+      debug:
+        msg: "Simulation complete"
+```
+
+- Этот плейбук полезен для отладки: он явно печатает полученные mappings и показывает извлечённый TAG для каждого сервиса.
+- Для реальной логики замените блок `Simulate work...` на ваши задачи (deploy/ansible roles и т.д.).
+
+4) Запуск playbook вручную (полезно для локальной отладки)
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+# пример: запустить playbook вручную и передать mappings
+ansible-playbook deploy/playbook.yml -i "localhost," --connection local --extra-vars '{"mappings": {"rag-service": "us-central1-docker.pkg.dev/PROJECT/REPO/rag-service:20251025-111006", "neuroboss-service": "us-central1-docker.pkg.dev/PROJECT/REPO/neuroboss-service:20251025-183318", "agent-service": "us-central1-docker.pkg.dev/PROJECT/REPO/agent-service:20251025-184200"}}'
+
+# для подробной отладки добавьте -vvv
+ansible-playbook -vvv deploy/playbook.yml -i "localhost," --connection local --extra-vars '...'
+```
+
+- Важно: общий JSON передаётся как единый аргумент `--extra-vars`. В оболочке используйте правильные кавычки (обычно внешние одинарные, внутренние двойные).
+
+5) Как отлаживать через API (пример запроса к бекенду)
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/api/deploy-services \
+  -H 'Content-Type: application/json' \
+  -d '{"mappings": {"rag-service": "us-central1-docker.pkg.dev/PROJECT/REPO/rag-service:20251025-111006", "neuroboss-service": "us-central1-docker.pkg.dev/PROJECT/REPO/neuroboss-service:20251025-183318", "agent-service": "us-central1-docker.pkg.dev/PROJECT/REPO/agent-service:20251025-184200"}}' | jq .
+```
+
+- Пример успешного ответа: `{"id": "<job-id>", "enqueued": true}` — где `id` можно использовать для просмотра логов и статуса.
+- Дальше проверьте в Redis:
+
+```bash
+# deploy metadata (raw mappings)
+redis-cli HGETALL deploy:<JOB_ID>
+# сам job: лог и состояние
+redis-cli HGETALL job:<JOB_ID>
+```
+
+6) Просмотр прогресса и логов
+
+- UI: страница Queue (если доступна) показывает список job'ов и логи.
+- Если UI недоступен, см. Redis и логи сервера/воркера:
+
+```bash
+tail -f uvicorn.log
+tail -f rq.log
+redis-cli HGETALL job:<JOB_ID>
+```
+
+7) Советы по отладке
+
+- Используйте `-vvv` в `ansible-playbook` для максимально подробного вывода.
+- Печатайте (debug) промежуточные переменные в плейбуке (особенно `mappings` и `ansible_env.DEPLOY_USER_SUB`).
+- Если плейбук падает из-за отсутствия переменной, убедитесь, что вы называете её `mappings` и что JSON корректен. Ошибки вроде `dict2items requires a dictionary` означают, что переменная либо не передана, либо имеет неправильный тип.
+- В плейбуке избегайте переменных с дефисами в имени (они неудобны для Jinja). Используйте `dict2items`/`items()` для итерации.
+
+---
+
+## Разработка и тесты
+
+Установка и запуск тестов в venv:
+
+```bash
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 pytest -q
 ```
 
-Безопасность и рекомендации
+---
 
-- Примонтированный `/var/run/docker.sock` даёт контейнеру высокий уровень контроля над Docker-демоном хоста — для production-окружений стоит рассмотреть изоляцию, RBAC, или отдельные билд-агенты.
-- Для приватных реестров используйте менеджер секретов (напри��ер, GCP Secret Manager, HashiCorp Vault) или системны�� переменные окружения, а не храните пароли прямо в запросах.
-- Рассмотрите запуск билд-работ в отдельном изолированном билдере (CI/CD), а не прямо в сервисе, если вам важна безопасность.
+## Дальше, что можно улучшить
 
-Дальше (опционально)
-
-- Добавить health endpoint.
-- Настроить логирование в файл/JSON и ротацию.
-- Добавить инструкцию по деплою в Kubernetes (с описанием способа доступа к Docker или использованию Kaniko/BuildKit для сборок внутри кластера).
-
-## Jobs, воркеры и очереди (observability)
-
-Ниже — краткое и практичное руководство по тому, как в этом проекте устроены задачи (jobs), очереди и воркеры, где искать логи и как отлаживать процесс исполнения задач.
-
-### Ключевые понятия
-- Job (метаданные) — запись о задаче, которую мы показываем в UI: `id`, `state` (queued/running/done/error), `logs` и т.д. Это «источник правды» для мониторинга.
-- Queued task (задача в очереди) — сериализованный объект задачи, который хранит очередь (в данном проекте — RQ в Redis). Пока задача в очереди, она ожидает воркера.
-- Worker — процесс, который берёт задачу из очереди и выполняет её, обновляя job-метаданные.
-
-### Где хранятся job-метаданные
-- В проекте используется абстракция `JobStore` (`app/store.py`) с двумя реализациями:
-  - `InMemoryJobStore` — хранит jobs в памяти Python-процесса (fallback, если Redis не настроен).
-  - `RedisJobStore` — хранит jobs в Redis (используется при нал��чии `REDIS_URL` и библиотеки `redis.asyncio`).
-
-Когда job создаётся, код вызывает `store.create_job(job_id, "queued", [])`. Логи и состояние обновляются через `store.append_log` и `store.set_state`.
-
-### Структура данных в Redis (если включён)
-- `jobs:ids` — множество всех id задач.
-- `job:<JOB_ID>` — hash с полями (например `id`, `state`, `logs` — где `logs` обычно хранится как JSON-массив строк).
-- `deploy:<JOB_ID>` — в случае deploy-операций проект дополнительно сохраняет служебную информацию (mappings, user и т.д.).
-- Пользовательские данные: `user:{sub}:registries`, `user:{sub}:creds`, `user:{sub}:history`, `user:{sub}:service_mappings`.
-
-### Очередь RQ и воркер
-- Если в окружении доступны sync-Redis и пакет `rq`, приложение инициализирует `_queue = Queue(connection=redis_sync.from_url(REDIS_URL))`.
-- При создании билда/деплоя код пытается положить задачу в RQ: `_queue.enqueue('app.worker.process_build', req.dict(), job_timeout=3600)`.
-- `app/worker.py` содержит `process_build` — точку входа для RQ worker. Воркеры запускаются отдельно и выполняют задачу, обновляя `job:<id>` через `JobStore`.
-- Если RQ или Redis недоступны, приложение использует fallback: `asyncio.create_task(_run_build(req))` (или `_run_deploy`) и запускает задачу в том же процессе (uvicorn). В этом случае обычно используется `InMemoryJobStore`.
-
-### Жизненный цикл job (схематично)
-1. Клиент делает POST `/api/build` или `/api/deploy-services`.
-2. Сервер генерирует `job_id` и вызывает `store.create_job(job_id, "queued", [])`.
-3. Сервер пытается enqueue в RQ. Если enqueue успешен — задача ждёт воркера. Если нет — запускается background task в том же процессе.
-4. Когда воркер/фон task начинает выполнение — `store.set_state(job_id, "running")`.
-5. Во время выполнения вывод (stdout) задачи записывается через `store.append_log(job_id, line)`; UI читает эти логи.
-6. По завершении ставится `done` или `error`.
-
-### Как смотреть логи и статус (полезные команды)
-- Список job id (Redis):
-```bash
-redis-cli SMEMBERS jobs:ids
-# или с URL
-redis-cli -u "${REDIS_URL}" SMEMBERS jobs:ids
-```
-
-- Просмотр job-метаданных (Redis):
-```bash
-redis-cli HGETALL "job:<JOB_ID>"
-# только логи
-redis-cli HGET "job:<JOB_ID>" logs | jq
-```
-
-- Просмотр deploy-метаданных:
-```bash
-redis-cli HGETALL "deploy:<JOB_ID>"
-```
-
-- Если вы используете RQ, запустите воркер вручную (в окружении с REDIS_URL):
-```bash
-export REDIS_URL="redis://localhost:6379/0"
-rq worker   # запускает воркер, логи видны в этом терминале
-```
-- Полезные инструменты для RQ: `rq info` и `rq-dashboard` (веб UI для очереди).
-
-- Через API / UI:
-  - Swagger: `http://localhost:8000/docs` — можно запросить `/api/builds` и `/api/build/{job_id}`.
-  - Frontend: `http://localhost:3000/#/queue` — список задач и live-логи (UI polling реализован в `frontend/src/components/Queue.jsx`).
-
-### Fallback: что если Redis/ RQ нет
-- В этом режиме `InMemoryJobStore` хранит метаданные в памяти процесса. Задачи могут исполняться в том же процессе (uvicorn) как asyncio background tasks. Ограничения:
-  - После перезапуска сервиса все in-memory job-логи и состояния теряются.
-  - Нет распределённой очереди: одна нода выполняет всё.
-
-Рекомендуется иметь локально Redis + отдельный RQ worker для корректного поведения и надёжного хранения логов.
-
-### Отмена / прерывание задач
-- В текущей реализации явного API для отмены нет. Подходы для добавления cancel:
-  - Если задача выполняется как subprocess (например `ansible-playbook`), воркер может запоминать PID процесса и при запросе на отмену делать `proc.terminate()` / `kill`.
-  - Если задача выполняется в asyncio task внутри процесса, можно хранить ссылку на `asyncio.Task` и вызывать `task.cancel()`.
-  - Также можно хранить флаг отмены в Redis (например `cancel:<JOB_ID>`) — воркер проверяет флаг и завершает работу аккуратно.
-
-Будьте осторожны: прерывание внешних инструментов (git/docker/ansible) может оставить промежуточные артефакты.
-
-### Рекомендации и best practices
-- Для разработки: поднять Redis локально и запускать `rq worker` в отдельном терминале — так логи и история будут сохраняться и доступны после рестартов сервиса.
-- Для продакшена: используйте Redis с ретеншеном логов или внешний лог-стор (ELK, Cloud Logging) и мониторинг воркеров (supervisord/systemd + `rq-dashboard`).
-- Для надёжности: задавайте timeouts и job-time-limits (RQ поддерживает `job_timeout`), реализуйте ретраи для временных ошибок.
-
-### Быстрый чеклист для отладки
-- Запустите Redis, если нет:
-```bash
-sudo apt install redis-server
-sudo service redis-server start
-```
-- Запустите backend (uvicorn) и фронтенд (vite).
-- Запустите RQ воркер:
-```bash
-export REDIS_URL="redis://localhost:6379/0"
-rq worker
-```
-- Создайте job через UI или curl и наблюдайте в `#/queue` и через Redis-ключи.
+- UI: страница Services с выбором TAG для каждого сервиса (Neuroboss / Agent / Rag) и аккуратная кнопка `Deploy`.
+- Улучшенная визуализация очереди: прогрессбар, стрим логов, авто-переход на страницу Queue после Deploy.
+- Добавить поле `rq_job_id` в job-хэш для лёгкой трассировки между RQ и нашими метаданными.
 
 ---
 
-Автор: добавлен автоматически по запросу.
+Автор: psychopanda
