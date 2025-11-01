@@ -1706,15 +1706,112 @@ async def reenque_job(job_id: str, request: Request, force: bool = False):
             pass
 
         q.enqueue('app.worker.process_deploy', job_id, mappings, job_timeout=3600)
-         try:
-             await store.append_log(job_id, 'Re-enqueued via UI')
-         except Exception:
-             pass
+        try:
+            await store.append_log(job_id, 'Re-enqueued via UI')
+        except Exception:
+            pass
 
-         return {'ok': True, 'id': job_id}
+        return {'ok': True, 'id': job_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post('/api/webhook')
+async def repo_webhook(payload: dict = Body(...), request: Request = None):
+    """Generic webhook receiver to trigger builds on release-branch updates.
+    Accepts common webhook bodies (GitHub/GitLab) or a minimal payload {"repo_url":..., "branch":...}.
+    If the branch matches RELEASE_BRANCH_REGEX (env) the endpoint will call the existing
+    `create_build` handler to enqueue/start a build.
+    """
+    # Extract branch from common webhook shapes
+    branch = None
+    repo_url = None
+
+    # GitHub/GitLab style: ref = refs/heads/<branch>
+    if isinstance(payload, dict):
+        if 'ref' in payload and isinstance(payload.get('ref'), str):
+            ref = payload.get('ref')
+            if ref.startswith('refs/heads/'):
+                branch = ref.split('/')[-1]
+
+        # repository info
+        repo = payload.get('repository') or {}
+        if isinstance(repo, dict):
+            for key in ('clone_url', 'git_http_url', 'git_url', 'html_url', 'ssh_url', 'url'):
+                if repo.get(key):
+                    repo_url = repo.get(key)
+                    break
+
+        # minimal webhook shape
+        if not repo_url:
+            repo_url = payload.get('repo_url') or payload.get('repository_url') or payload.get('repository_url')
+        if not branch:
+            branch = payload.get('branch') or payload.get('ref_branch')
+
+    if not repo_url or not branch:
+        raise HTTPException(status_code=400, detail='Missing repo_url or branch in payload')
+
+    # Determine release branch regex from env (defaults to release*|main|master)
+    import re
+    pattern = os.environ.get('RELEASE_BRANCH_REGEX', r'^(release(?:-|$)|main$|master$)')
+    try:
+        if not re.match(pattern, branch):
+            return {"ok": False, "reason": "branch_not_release", "branch": branch}
+    except re.error:
+        # invalid pattern -> be conservative and refuse
+        raise HTTPException(status_code=500, detail='Invalid RELEASE_BRANCH_REGEX')
+
+    # Determine registry: prefer explicit payload, then environment DEFAULT_REGISTRY
+    registry = None
+    if isinstance(payload, dict):
+        registry = payload.get('registry') or payload.get('image_registry')
+
+    if not registry:
+        registry = os.environ.get('DEFAULT_REGISTRY')
+
+    if not registry:
+        raise HTTPException(status_code=400, detail='Missing target registry: provide "registry" in webhook payload or set DEFAULT_REGISTRY env')
+
+    # Optional tag override
+    tag = None
+    if isinstance(payload, dict):
+        tag = payload.get('tag') or payload.get('image_tag')
+
+    # Build payload for create_build
+    build_payload = {
+        'repo_url': repo_url,
+        'branch': branch,
+        'tag': tag,
+        'registry': registry,
+        'dockerfile_path': payload.get('dockerfile_path'),
+        'registry_username': payload.get('registry_username'),
+        'registry_password': payload.get('registry_password'),
+        'build_args': payload.get('build_args'),
+        'push': True,
+        'dry_run': payload.get('dry_run', False),
+        'no_cache': payload.get('no_cache', False),
+        'gcp_secret_name': payload.get('gcp_secret_name'),
+    }
+
+    # Reuse existing create_build handler (it expects CreateBuildPayload)
+    try:
+        cb = CreateBuildPayload(**build_payload)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f'Invalid build payload: {e}')
+
+    # Call create_build which will create a job and enqueue/run it
+    # pass the incoming request so auth/SA-file logic works the same
+    result = await create_build(cb, request)
+
+    # If we have async redis client available, store origin metadata for tracing
+    try:
+        job_id = result.get('id') if isinstance(result, dict) else None
+        if job_id and _aredis_client is not None:
+            await _aredis_client.hset(f"job:{job_id}", mapping={"origin": "webhook", "origin_payload": json.dumps({'repo_url': repo_url, 'branch': branch, 'registry': registry, 'tag': tag})})
+    except Exception:
+        pass
+
+    return result
 
 # serve static files if present
 static_dir = os.path.join(os.path.dirname(__file__), "static")
