@@ -22,7 +22,8 @@ services:
 
   worker:
     build: .
-    command: ["sh", "-c", "rq worker -u \"$$REDIS_URL\" default"]
+    # write worker logs to /app/rq.log so host can see them (volume below)
+    command: ["sh", "-c", "rq worker -u \"$$REDIS_URL\" default 2>&1 | tee -a /app/rq.log"]
     environment:
       - REDIS_URL=redis://redis:6379/0
       - GCP_SA_KEY_PATH=/run/secrets/docker-puller-key.json
@@ -30,8 +31,10 @@ services:
       - ./:/app:rw
       - /var/run/docker.sock:/var/run/docker.sock
       - ./secrets:/run/secrets:ro
+      - ./rq.log:/app/rq.log
     depends_on:
       - redis
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -53,11 +56,15 @@ services:
     working_dir: /app/frontend
     volumes:
       - ./frontend:/app/frontend:rw
-      - /app/frontend/node_modules
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+      # do NOT bind-mount node_modules from the host into the container — this avoids
+      # shipping host's node_modules into the docker build context and prevents
+      # errors caused by symlinks inside node_modules (e.g. baseline-browser-mapping)
+      # If you need to persist node_modules between runs, mount a named volume instead.
+      - frontend-node-modules:/app/frontend/node_modules
+    command: sh -c "npm ci --prefer-offline --no-audit && npm run dev -- --host 0.0.0.0"
     # Host port for frontend is configurable via .env as FRONTEND_PORT (defaults to 3000)
     ports:
-      - "${FRONTEND_PORT:-3333}:3000"
+      - "${FRONTEND_PORT:-3000}:3000"
     environment:
       - DOCKER=1
       - CHOKIDAR_USEPOLLING=true
@@ -66,9 +73,12 @@ services:
       - PORT=${FRONTEND_PORT:-3000}
     depends_on:
       - app
+    restart: unless-stopped
 
 volumes:
   dind-data:
     name: docker_builder_dind_data
   redis-data:
     name: docker_builder_redis_data
+  frontend-node-modules:
+    name: docker_builder_frontend_node_modules
