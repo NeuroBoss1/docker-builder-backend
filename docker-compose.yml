@@ -3,6 +3,8 @@ services:
   app:
     build: .
     # Host port is configurable via .env as APP_PORT (defaults to 8000)
+    env_file:
+      - ./env
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
@@ -12,6 +14,8 @@ services:
       - ./secrets:/run/secrets:ro
       # mount ansible vault password into /root so ansible-playbook can use it
       - ./deploy/deploy/ansible/files/ansible_vault_pass.txt:/root/.ansible_vault_pass.txt:ro
+      # mount env file into container via named volume so we can manage it as a docker volume
+      - env-file:/app/.env:ro
     environment:
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://redis:6379/0
@@ -26,7 +30,9 @@ services:
   worker:
     build: .
     # write worker logs to /app/rq.log so host can see them (volume below)
-    command: ["sh", "-c", "rq worker -u \"$$REDIS_URL\" default 2>&1 | tee -a /app/rq.log"]
+    command: ["sh", "-c", "if [ -f \"${GCP_SA_KEY_PATH:-/run/secrets/gcp-sa-key.json}\" ]; then echo 'Found GCP SA key, activating'; gcloud auth activate-service-account --key-file \"${GCP_SA_KEY_PATH}\" || gcloud auth activate-service-account --key-file /run/secrets/gcp-sa-key.json; gcloud auth configure-docker us-central1-docker.pkg.dev || true; else echo 'GCP SA key not found, skipping gcloud auth'; fi; rq worker -u \"$$REDIS_URL\" default 2>&1 | tee -a /app/rq.log"]
+    env_file:
+      - ./env
     environment:
       - REDIS_URL=redis://redis:6379/0
       - GCP_SA_KEY_PATH=/run/secrets/docker-puller-key.json
@@ -36,6 +42,7 @@ services:
       - ./secrets:/run/secrets:ro
       # mount ansible vault password into /root so ansible-playbook can use it
       - ./deploy/deploy/ansible/files/ansible_vault_pass.txt:/root/.ansible_vault_pass.txt:ro
+      - env-file:/app/.env:ro
       - ./rq.log:/app/rq.log
     depends_on:
       - redis
@@ -44,6 +51,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # store Redis data on a named docker volume for persistence between container restarts
     volumes:
       - redis-data:/data
 
@@ -66,6 +74,8 @@ services:
   frontend:
     image: node:18-alpine
     working_dir: /app/frontend
+    env_file:
+      - ./env
     volumes:
       - ./frontend:/app/frontend:rw
       # do NOT bind-mount node_modules from the host into the container — this avoids
@@ -73,6 +83,7 @@ services:
       # errors caused by symlinks inside node_modules (e.g. baseline-browser-mapping)
       # If you need to persist node_modules between runs, mount a named volume instead.
       - frontend-node-modules:/app/frontend/node_modules
+      - env-file:/app/.env:ro
     command: sh -c "npm ci --prefer-offline --no-audit && npm run dev -- --host 0.0.0.0"
     # Host port for frontend is configurable via .env as FRONTEND_PORT (defaults to 3000)
     ports:
@@ -90,7 +101,13 @@ services:
 volumes:
   dind-data:
     name: docker_builder_dind_data
-  redis-data:
-    name: docker_builder_redis_data
   frontend-node-modules:
     name: docker_builder_frontend_node_modules
+  redis-data:
+    name: docker_builder_redis_data
+  env-file:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/env
