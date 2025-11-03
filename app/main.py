@@ -375,12 +375,12 @@ async def _refresh_google_access_token_for_user(sub: str) -> Optional[str]:
 
 
 async def _get_user_from_request(request: Request) -> Optional[Dict]:
-    """Simplified auth: if secrets/docker-puller-key.json exists, user is authenticated.
-    All other auth methods are temporarily disabled.
+    """Simplified auth: if a service account file is available, user is authenticated.
+    Uses _resolve_service_account_path() to find the SA file in various possible locations.
     """
-    # Check if secrets/docker-puller-key.json exists
-    sa_path = 'secrets/docker-puller-key.json'
-    if os.path.exists(sa_path):
+    # Resolve service account path using helper (env var, /run/secrets, or ./secrets)
+    sa_path = _resolve_service_account_path()
+    if sa_path and os.path.exists(sa_path):
         try:
             with open(sa_path, 'r', encoding='utf-8') as f:
                 doc = json.load(f)
@@ -493,15 +493,41 @@ async def set_profile(request: Request):
     return {'ok': True}
 
 
+def _resolve_service_account_path() -> Optional[str]:
+    """Return path to service account key file.
+    Priority:
+      1. Environment variable GCP_SA_KEY_PATH
+      2. /run/secrets/docker-puller-key.json (mounted secrets dir)
+      3. ./secrets/docker-puller-key.json (repo path)
+    Returns None if not found.
+    """
+    # 1) env var
+    env_path = os.environ.get('GCP_SA_KEY_PATH')
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    # 2) common docker secret mount
+    run_secrets = '/run/secrets/docker-puller-key.json'
+    if os.path.exists(run_secrets):
+        return run_secrets
+
+    # 3) repository-local secrets folder (used by some dev setups)
+    repo_secrets = os.path.join(os.getcwd(), 'secrets', 'docker-puller-key.json')
+    if os.path.exists(repo_secrets):
+        return repo_secrets
+
+    return None
+
+
 @app.get("/api/service-account-info")
 async def get_service_account_info(request: Request):
-    """Get service account information from secrets/docker-puller-key.json"""
+    """Get service account information from available service account key file."""
     info = await _get_user_from_request(request)
     if not info or not info.get('sub'):
         raise HTTPException(status_code=401, detail='Missing or invalid authentication')
 
-    sa_path = 'secrets/docker-puller-key.json'
-    if not os.path.exists(sa_path):
+    sa_path = _resolve_service_account_path()
+    if not sa_path:
         raise HTTPException(status_code=404, detail='Service account file not found')
 
     try:
@@ -644,8 +670,8 @@ async def test_registry_auth(registry_id: str, request: Request):
 
         # If using service account, get access token
         if use_service_account:
-            sa_path = 'secrets/docker-puller-key.json'
-            if os.path.exists(sa_path):
+            sa_path = _resolve_service_account_path()
+            if sa_path:
                 try:
                     # Import Google auth libraries
                     from google.oauth2 import service_account
@@ -719,12 +745,12 @@ async def list_registry_images(registry_id: str, request: Request):
     registry_json = registries_data.get(registry_id)
 
     if not registry_json:
-        raise HTTPException(status_code=404, detail="Registry not found")
+        raise HTTPException(status_code=404, detail='Registry not found')
 
     try:
         registry = json.loads(registry_json)
     except Exception:
-        raise HTTPException(status_code=500, detail="Invalid registry data")
+        raise HTTPException(status_code=500, detail='Invalid registry data')
 
     images = []
 
@@ -736,8 +762,8 @@ async def list_registry_images(registry_id: str, request: Request):
 
         # If using service account, get access token
         if use_service_account:
-            sa_path = 'secrets/docker-puller-key.json'
-            if os.path.exists(sa_path):
+            sa_path = _resolve_service_account_path()
+            if sa_path:
                 try:
                     from google.oauth2 import service_account
                     from google.auth.transport.requests import Request
