@@ -29,6 +29,10 @@ export default function Registry() {
       if (r.data.project_id && !projectId) {
         setProjectId(r.data.project_id)
       }
+      // If service account is available, default the checkbox to true
+      if (r.data) {
+        setUseServiceAccount(true)
+      }
     } catch (e) {
       console.log('Service account not available:', e)
     }
@@ -158,16 +162,20 @@ export default function Registry() {
               onChange={e => setUrl(e.target.value)}
             />
 
-            {serviceAccountInfo && (
-              <label style={{border: '1px solid #1976d2', padding: '8px', borderRadius: '4px', backgroundColor: '#e3f2fd'}}>
-                <input
-                  type="checkbox"
-                  checked={useServiceAccount}
-                  onChange={e => setUseServiceAccount(e.target.checked)}
-                />
-                {' '}Use Service Account for authentication (recommended for GCR/Artifact Registry)
-              </label>
-            )}
+            {/* Always show the option and allow selecting it even if SA is not yet present. */}
+            <label style={{border: '1px solid #1976d2', padding: '8px', borderRadius: '4px', backgroundColor: serviceAccountInfo ? '#e3f2fd' : '#fff'}}>
+              <input
+                type="checkbox"
+                checked={useServiceAccount}
+                onChange={e => setUseServiceAccount(e.target.checked)}
+              />
+              {' '}Use Service Account for authentication (recommended for GCR/Artifact Registry)
+              {!serviceAccountInfo && (
+                <div style={{fontSize: '12px', color: '#c66', marginTop: '6px'}}>
+                  Service account not detected — you can still select this option, but authentication/test will fail until the service account key is available on the worker.
+                </div>
+              )}
+            </label>
 
             {!useServiceAccount && (
               <>
@@ -317,4 +325,3 @@ export default function Registry() {
     </div>
   )
 }
-

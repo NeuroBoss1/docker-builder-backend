@@ -1,0 +1,6 @@
+---
+# Top-level orchestration: run cleanup first, then main deploy playbook
+- import_playbook: cleanup_disk_when_low.yml
+
+- import_playbook: playbook.yml
+

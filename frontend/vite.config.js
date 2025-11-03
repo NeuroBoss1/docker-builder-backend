@@ -10,7 +10,9 @@ export default defineConfig({
     // Proxy API requests to the backend inside docker (app) or to localhost during local dev.
     proxy: {
       '/api': {
-        target: process.env.DOCKER ? `http://app:${process.env.APP_PORT || 24015}` : `http://localhost:${process.env.APP_PORT || 24015}`,
+        // When running inside Docker, target the app service on its container-internal port (8000).
+        // For local dev (not in Docker), allow overriding with APP_PORT env (default 24015).
+        target: process.env.DOCKER ? `http://app:8000` : `http://localhost:${process.env.APP_PORT || 24015}`,
         changeOrigin: true,
         secure: false,
       }

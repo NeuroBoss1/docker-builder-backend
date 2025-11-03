@@ -14,8 +14,8 @@ services:
       - ./secrets:/run/secrets:ro
       # mount ansible vault password into /root so ansible-playbook can use it
       - ./deploy/deploy/ansible/files/ansible_vault_pass.txt:/root/.ansible_vault_pass.txt:ro
-      # mount env file into container via named volume so we can manage it as a docker volume
-      - env-file:/app/.env:ro
+      # mount env file into container as bind mount (file -> file)
+      - ./env:/app/.env:ro
     environment:
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://redis:6379/0
@@ -42,7 +42,7 @@ services:
       - ./secrets:/run/secrets:ro
       # mount ansible vault password into /root so ansible-playbook can use it
       - ./deploy/deploy/ansible/files/ansible_vault_pass.txt:/root/.ansible_vault_pass.txt:ro
-      - env-file:/app/.env:ro
+      - ./env:/app/.env:ro
       - ./rq.log:/app/rq.log
     depends_on:
       - redis
@@ -83,7 +83,7 @@ services:
       # errors caused by symlinks inside node_modules (e.g. baseline-browser-mapping)
       # If you need to persist node_modules between runs, mount a named volume instead.
       - frontend-node-modules:/app/frontend/node_modules
-      - env-file:/app/.env:ro
+      - ./env:/app/.env:ro
     command: sh -c "npm ci --prefer-offline --no-audit && npm run dev -- --host 0.0.0.0"
     # Host port for frontend is configurable via .env as FRONTEND_PORT (defaults to 3000)
     ports:
@@ -105,9 +105,4 @@ volumes:
     name: docker_builder_frontend_node_modules
   redis-data:
     name: docker_builder_redis_data
-  env-file:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${PWD}/env
+  # Note: env file is bind-mounted per-service as ./env:/app/.env:ro
