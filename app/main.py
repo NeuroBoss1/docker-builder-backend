@@ -1295,50 +1295,174 @@ async def _run_build(req: BuildRequest):
 
 # Provide an async in-process deploy runner used when RQ is not available.
 async def _run_deploy(job_id: str, mappings: dict, user_sub: str):
-    """Run ansible-playbook with mappings passed as --extra-vars (JSON). Writes logs to store."""
+    """Run ansible-playbook with mappings passed as --extra-vars (JSON). Writes logs to store.
+    This implementation DOES NOT modify repository group_vars files. Instead it generates a
+    temporary vars file (YAML) placed next to the playbook and passes it to ansible via
+    --extra-vars @<tmpfile>. Runs ansible-playbook in the deploy directory using the
+    provided command pattern.
+    """
     await store.set_state(job_id, "running")
     try:
         # wrap mappings under key 'mappings' so playbook can reference {{ mappings }}
         extra_vars = json.dumps({'mappings': mappings})
 
-        # Find playbook path - prefer ./deploy/playbook.yml or ./playbook.yml
+        # Build a small vars dict from mappings for NEUROBOSS_TAG/AGENT_TAG/RAG_TAG
+        def _extract_tag(img: str) -> str:
+            if not img or not isinstance(img, str):
+                return ''
+            last_slash = img.rfind('/')
+            last_colon = img.rfind(':')
+            if last_colon > last_slash:
+                return img[last_colon+1:]
+            return ''
+
+        svc_to_var = {
+            'neuroboss': 'NEUROBOSS_TAG',
+            'agent': 'AGENT_TAG',
+            'rag': 'RAG_TAG'
+        }
+
+        vars_map = {}
+        for svc, var in svc_to_var.items():
+            img = mappings.get(svc) if isinstance(mappings, dict) else None
+            tag = _extract_tag(img) if img else ''
+            if tag:
+                vars_map[var] = tag
+
+        # Если фронтенд передал полные image:tag значения — положим их в vars также
+        image_vars = {
+            'neuroboss': 'NEUROBOSS_IMAGE',
+            'agent': 'AGENT_IMAGE',
+            'rag': 'RAG_IMAGE'
+        }
+        for svc, var in image_vars.items():
+            img = mappings.get(svc) if isinstance(mappings, dict) else None
+            if img and isinstance(img, str) and img.strip():
+                vars_map[var] = img.strip()
+
+        # Always include the full mappings under 'mappings' so playbooks can use it
+        # Build YAML content for temporary vars file
+        import tempfile
+        import shutil
+        import stat
+
+        # Locate ansible directory (prefer deploy/deploy/ansible or deploy/ansible)
         candidates = [
-            os.path.join(os.getcwd(), 'deploy', 'playbook.yml'),
-            os.path.join(os.getcwd(), 'playbook.yml'),
-            os.path.join(os.path.dirname(__file__), '..', 'deploy', 'playbook.yml')
+            os.path.join(os.getcwd(), 'deploy', 'deploy', 'ansible'),
+            os.path.join(os.getcwd(), 'deploy', 'ansible'),
+            os.path.join(os.path.dirname(__file__), '..', 'deploy', 'deploy', 'ansible')
         ]
-        playbook = None
-        for c in candidates:
+        playbook_dir = None
+        for p in candidates:
             try:
-                if os.path.exists(c):
-                    playbook = c
+                if os.path.isdir(p):
+                    playbook_dir = p
                     break
             except Exception:
-                pass
+                continue
 
-        if not playbook:
-            msg = 'No ansible playbook found (searched deploy/playbook.yml, playbook.yml)'
-            await store.append_log(job_id, msg)
+        if not playbook_dir:
+            await store.append_log(job_id, 'Ansible directory not found (looking for deploy/.../ansible).')
             await store.set_state(job_id, 'error')
             return
 
-        # Run ansible-playbook locally
+        # Prepare temp vars file inside playbook_dir so ansible can read relative paths
+        tmp_file_path = None
+        try:
+            tf = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.yml', dir=playbook_dir, encoding='utf-8')
+            tmp_file_path = tf.name
+            try:
+                # write vars_map first
+                for k, v in vars_map.items():
+                    safe_v = str(v).replace('"', '\\"')
+                    tf.write(f'{k}: "{safe_v}"\n')
+                # write mappings nested key
+                tf.write('mappings:\n')
+                if isinstance(mappings, dict):
+                    for mk, mv in mappings.items():
+                        safe_mv = str(mv).replace('"', '\\"')
+                        tf.write(f'  {mk}: "{safe_mv}"\n')
+                else:
+                    # fallback: write raw JSON string
+                    safe_json = json.dumps(mappings).replace('"', '\\"')
+                    tf.write(f'  raw: "{safe_json}"\n')
+            finally:
+                tf.close()
+            await store.append_log(job_id, f'Created temporary vars file: {tmp_file_path}')
+        except Exception as e:
+            await store.append_log(job_id, f'Failed to create temporary vars file: {e}')
+            tmp_file_path = None
+
+        # Run ansible-playbook in playbook_dir using the provided command pattern
+        # Prefer main playbook `playbook.yml`; fallback to `cleanup_disk_when_low.yml` if main missing
+        playbook_name = None
+        for name in ('playbook.yml', 'cleanup_disk_when_low.yml'):
+            if os.path.exists(os.path.join(playbook_dir, name)):
+                playbook_name = name
+                break
+        if not playbook_name:
+            await store.append_log(job_id, f'No playbook found in {playbook_dir} (checked playbook.yml and cleanup_disk_when_low.yml)')
+            await store.set_state(job_id, 'error')
+            return
+
+        # Build ansible-playbook command and prefer google_compute_engine private key
+        ssh_common = '-o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+        limit_list = os.environ.get('DEPLOY_LIMIT', 'node1,node2,node3')
+
+        # vault password file and inventory filename
+        vault_pw = os.path.expanduser('~/.ansible_vault_pass.txt')
+        inventory = 'inventory.ini'
+
         cmd = [
             'ansible-playbook',
-            playbook,
-            '-i', 'localhost,',
-            '--connection', 'local',
-            '--extra-vars', extra_vars
+            '-i', inventory,
+            playbook_name,
+            '-u', 'psychopanda',
+            '--vault-password-file', vault_pw,
+            '--limit', limit_list,
+            '--ssh-common-args', ssh_common,
         ]
 
+        # If we have a tmp vars file, instruct ansible to load it (@file)
+        if tmp_file_path:
+            cmd.extend(['--extra-vars', f'@{tmp_file_path}'])
+
+        # Attempt to discover private key paths like worker.py (prefer google_compute_engine)
+        ssh_key_candidates = [
+            '/run/secrets/google_compute_engine',
+            os.path.join(os.path.dirname(__file__), '..', 'deploy', 'deploy', 'ansible', 'files', 'google_compute_engine'),
+            os.path.expanduser('~/.ssh/google_compute_engine'),
+            '/run/secrets/ansible_id_rsa'
+        ]
+        chosen_ssh_key = None
+        for kpath in ssh_key_candidates:
+            try:
+                if kpath.endswith('.pub'):
+                    continue
+                if os.path.exists(kpath) and os.path.isfile(kpath):
+                    chosen_ssh_key = kpath
+                    break
+            except Exception:
+                continue
+
+        if chosen_ssh_key:
+            try:
+                try:
+                    os.chmod(chosen_ssh_key, 0o600)
+                except Exception:
+                    pass
+                cmd.extend(['--private-key', chosen_ssh_key])
+            except Exception:
+                pass
+
         env = os.environ.copy()
-        # Pass user_sub as env var for playbook to use if needed
         env['DEPLOY_USER_SUB'] = user_sub
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            cwd=playbook_dir,
             env=env
         )
 
@@ -1356,6 +1480,14 @@ async def _run_deploy(job_id: str, mappings: dict, user_sub: str):
         else:
             await store.set_state(job_id, 'error')
             await store.append_log(job_id, f'ansible-playbook exited with code {rc}')
+
+        # cleanup temp file
+        if tmp_file_path:
+            try:
+                os.remove(tmp_file_path)
+                await store.append_log(job_id, f'Removed temporary vars file: {tmp_file_path}')
+            except Exception as e:
+                await store.append_log(job_id, f'Failed to remove temporary vars file {tmp_file_path}: {e}')
 
     except Exception as e:
         await store.set_state(job_id, 'error')

@@ -1,3 +1,4 @@
+version: '3.7'
 services:
   app:
     build: .
@@ -9,6 +10,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # bind local secrets folder into the app container (read-only)
       - ./secrets:/run/secrets:ro
+      # mount ansible vault password into /root so ansible-playbook can use it
+      - ./deploy/deploy/ansible/files/ansible_vault_pass.txt:/root/.ansible_vault_pass.txt:ro
     environment:
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://redis:6379/0
@@ -31,6 +34,8 @@ services:
       - ./:/app:rw
       - /var/run/docker.sock:/var/run/docker.sock
       - ./secrets:/run/secrets:ro
+      # mount ansible vault password into /root so ansible-playbook can use it
+      - ./deploy/deploy/ansible/files/ansible_vault_pass.txt:/root/.ansible_vault_pass.txt:ro
       - ./rq.log:/app/rq.log
     depends_on:
       - redis
@@ -50,6 +55,13 @@ services:
     volumes:
       - dind-data:/var/lib/docker
     command: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "docker info >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
 
   frontend:
     image: node:18-alpine
