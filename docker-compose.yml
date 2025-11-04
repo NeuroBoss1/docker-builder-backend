@@ -92,8 +92,9 @@ services:
       - DOCKER=1
       - CHOKIDAR_USEPOLLING=true
       - VITE_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      # Allow Vite to pick up the desired port via standard PORT env var
-      - PORT=${FRONTEND_PORT:-3000}
+      # Vite must always listen on the container's port 3000.
+      # Host port is controlled by FRONTEND_PORT and mapped to container port 3000.
+      - PORT=3000
     depends_on:
       - app
     restart: unless-stopped

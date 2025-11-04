@@ -20,7 +20,9 @@ RUN apt-get update && \
 
 # Copy requirements and install Python deps (also install ansible-core via pip)
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt ansible-core
+RUN pip install --no-cache-dir -r requirements.txt ansible-core && \
+    # Install community.general collection so modules like ufw are available
+    ansible-galaxy collection install community.general
 
 # Install Google Cloud SDK from official repo (creates keyring and repo entry)
 RUN set -eux; \
