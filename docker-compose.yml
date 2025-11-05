@@ -6,7 +6,7 @@ services:
     env_file:
       - ./env
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "${APP_PORT:-24015}:24015"
     volumes:
       - ./:/app:rw
       - /var/run/docker.sock:/var/run/docker.sock
@@ -21,7 +21,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - FRONTEND_REDIRECT=${FRONTEND_REDIRECT:-http://localhost:3000/oauth_google_callback}
+      - FRONTEND_REDIRECT=${FRONTEND_REDIRECT:-http://localhost:3030/oauth_google_callback}
       # path inside container where your service account JSON may be mounted
       - GCP_SA_KEY_PATH=/run/secrets/docker-puller-key.json
     depends_on:
@@ -85,16 +85,16 @@ services:
       - frontend-node-modules:/app/frontend/node_modules
       - ./env:/app/.env:ro
     command: sh -c "npm ci --prefer-offline --no-audit && npm run dev -- --host 0.0.0.0"
-    # Host port for frontend is configurable via .env as FRONTEND_PORT (defaults to 3000)
+    # Map host port 3001 to container port 3030 so frontend is reachable at host:3001
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "3030:3030"
     environment:
       - DOCKER=1
       - CHOKIDAR_USEPOLLING=true
       - VITE_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      # Vite must always listen on the container's port 3000.
-      # Host port is controlled by FRONTEND_PORT and mapped to container port 3000.
-      - PORT=3000
+      - VITE_PROXY_TARGET=http://app:24015
+      # Vite must always listen on the container's port 3030.
+      - PORT=3030
     depends_on:
       - app
     restart: unless-stopped
