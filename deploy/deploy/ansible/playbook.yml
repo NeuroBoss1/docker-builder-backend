@@ -5,6 +5,25 @@
   vars_files:
     - group_vars/all.yml
 
+  pre_tasks:
+    - name: Ensure Ansible Galaxy collections are installed
+      delegate_to: localhost
+      become: no
+      run_once: true
+      block:
+        - name: Install google.cloud collection from requirements
+          community.general.ansible_galaxy_install:
+            type: collection
+            requirements_file: "{{ playbook_dir }}/requirements.yml"
+          ignore_errors: yes
+          register: galaxy_install
+
+        - name: Fallback - Install google.cloud collection directly
+          ansible.builtin.command:
+            cmd: ansible-galaxy collection install google.cloud -p ~/.ansible/collections
+          when: galaxy_install is failed
+          changed_when: false
+
   tasks:
     - name: Show disk usage (df)
       shell: df -h --output=source,pcent,target -x tmpfs -x devtmpfs

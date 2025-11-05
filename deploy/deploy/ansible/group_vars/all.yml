@@ -6,6 +6,19 @@ ansible_become_method: sudo
 deploy_user: psychopanda
 ansible_ssh_private_key_file: /run/secrets/google_compute_engine
 
+# ========================================
+# Google Secret Manager Configuration
+# ========================================
+# Укажите ваш GCP Project ID
+gcp_project_id: "your-gcp-project-id"
+
+# Service Account для доступа к Secret Manager
+# Можно указать путь к JSON ключу или использовать Application Default Credentials
+gcp_service_account_file: "{{ lookup('env', 'GOOGLE_APPLICATION_CREDENTIALS') | default('/run/secrets/docker-compute-key.json', true) }}"
+
+# Включить/выключить использование Secret Manager (по умолчанию false для безопасности)
+use_secret_manager: false
+
 # Минимальная версия docker-compose, используемая плейбуком (без префикса 'v')
 DOCKER_COMPOSE_VERSION: "2.20.2"
 
@@ -27,40 +40,50 @@ NEUROBOSS_API_URL: "http://localhost:8000"
 ASC_MINIO_URL: "http://minio:9000"
 CURRENT_URL: "http://example.local"
 
-# API keys & secrets (placeholders)
-OPENAI_API_KEY: ""
-GOOGLE_API_KEY: ""
-ANTHROPIC_API_KEY: ""
-LANGCHAIN_API_KEY: ""
-ASC_SECRETKEY: ""
-ASC_INTERNSECRETKEY: ""
-FERNET_SECRET: "changeme"
-AGENTHUB_TOKEN: ""
-POETRY_SECRET: ""
-TELEGRAM_API_HASH: ""
-TELEGRAM_NOTIFICATIONS_TOKEN: ""
-TELEGRAM_NEUROBOSS_FEEDBACK_TOKEN: ""
+# ========================================
+# API keys & secrets
+# ========================================
+# Для использования Secret Manager:
+# 1. Установите use_secret_manager: true
+# 2. Укажите правильный gcp_project_id выше
+# 3. Убедитесь, что секреты созданы в Google Secret Manager
+# 4. Имена секретов должны соответствовать указанным ниже (например: "openai-api-key")
+#
+# Формат: {{ lookup('google.cloud.gcp_secret_manager', 'secret-name', project=gcp_project_id) if use_secret_manager else 'default_value' }}
+
+OPENAI_API_KEY: "{{ lookup('google.cloud.gcp_secret_manager', 'openai-api-key', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
+GOOGLE_API_KEY: "{{ lookup('google.cloud.gcp_secret_manager', 'google-api-key', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
+ANTHROPIC_API_KEY: "{{ lookup('google.cloud.gcp_secret_manager', 'anthropic-api-key', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
+LANGCHAIN_API_KEY: "{{ lookup('google.cloud.gcp_secret_manager', 'langchain-api-key', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
+ASC_SECRETKEY: "{{ lookup('google.cloud.gcp_secret_manager', 'asc-secret-key', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
+ASC_INTERNSECRETKEY: "{{ lookup('google.cloud.gcp_secret_manager', 'asc-intern-secret-key', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
+FERNET_SECRET: "{{ lookup('google.cloud.gcp_secret_manager', 'fernet-secret', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else 'changeme' }}"
+AGENTHUB_TOKEN: "{{ lookup('google.cloud.gcp_secret_manager', 'agenthub-token', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
+POETRY_SECRET: "{{ lookup('google.cloud.gcp_secret_manager', 'poetry-secret', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
+TELEGRAM_API_HASH: "{{ lookup('google.cloud.gcp_secret_manager', 'telegram-api-hash', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
+TELEGRAM_NOTIFICATIONS_TOKEN: "{{ lookup('google.cloud.gcp_secret_manager', 'telegram-notifications-token', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
+TELEGRAM_NEUROBOSS_FEEDBACK_TOKEN: "{{ lookup('google.cloud.gcp_secret_manager', 'telegram-neuroboss-feedback-token', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
 
 # Database
-DATABASE_URL: "postgresql://postgres:password@localhost:5432/neuroboss"
-AGENTHUB_DATABASE_URL: ""
+DATABASE_URL: "{{ lookup('google.cloud.gcp_secret_manager', 'database-url', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else 'postgresql://postgres:password@localhost:5432/neuroboss' }}"
+AGENTHUB_DATABASE_URL: "{{ lookup('google.cloud.gcp_secret_manager', 'agenthub-database-url', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
 POSTGRES_DB: "neuroboss"
-POSTGRES_PASSWORD: ""
+POSTGRES_PASSWORD: "{{ lookup('google.cloud.gcp_secret_manager', 'postgres-password', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
 
 # Redis
 REDIS_PORT: 6379
-REDIS_PASSWORD: ""
+REDIS_PASSWORD: "{{ lookup('google.cloud.gcp_secret_manager', 'redis-password', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
 
 # MinIO
-ASC_MINIO_ACCESS_KEY: "minioadmin"
-ASC_MINIO_SECRET_KEY: "minioadmin"
+ASC_MINIO_ACCESS_KEY: "{{ lookup('google.cloud.gcp_secret_manager', 'minio-access-key', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else 'minioadmin' }}"
+ASC_MINIO_SECRET_KEY: "{{ lookup('google.cloud.gcp_secret_manager', 'minio-secret-key', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else 'minioadmin' }}"
 ASC_MINIO_SECURE: false
 
 # General settings
 ASC_PROJECT_MODE: "production"
 ASC_HOST: "0.0.0.0"
-AGENTHUB_ORGANIZATION_ID: ""
-TELEGRAM_API_ID: ""
+AGENTHUB_ORGANIZATION_ID: "{{ lookup('google.cloud.gcp_secret_manager', 'agenthub-organization-id', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
+TELEGRAM_API_ID: "{{ lookup('google.cloud.gcp_secret_manager', 'telegram-api-id', project=gcp_project_id, key=gcp_service_account_file) if use_secret_manager else '' }}"
 TRANSCRIBE_MODEL: "whisper-1"
 TOOL_DEBUG: false
 DB_MIGRATION: false

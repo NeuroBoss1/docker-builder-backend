@@ -1,0 +1,6 @@
+---
+# Ansible Galaxy requirements
+collections:
+  - name: google.cloud
+    version: ">=1.0.0"
+
