@@ -1,0 +1,18 @@
+[Unit]
+Description=NeuroBoss docker-compose stack
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory={{ app_dir }}
+User={{ deploy_user }}
+Environment=COMPOSE_HTTP_TIMEOUT=300
+ExecStart=/usr/local/bin/docker-compose -f {{ app_dir }}/docker-compose.yml up -d
+ExecStop=/usr/local/bin/docker-compose -f {{ app_dir }}/docker-compose.yml down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+

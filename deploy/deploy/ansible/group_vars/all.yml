@@ -1,0 +1,71 @@
+# Общие переменные для всех хостов
+ansible_python_interpreter: /usr/bin/python3
+ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5'
+ansible_become: true
+ansible_become_method: sudo
+deploy_user: psychopanda
+ansible_ssh_private_key_file: /run/secrets/google_compute_engine
+
+# Минимальная версия docker-compose, используемая плейбуком (без префикса 'v')
+DOCKER_COMPOSE_VERSION: "2.20.2"
+
+# Путь приложения и имя docker-compose файла для каждой ноды
+app_dir: "/home/{{ deploy_user }}/neuroboss"
+# Используем per-node docker-compose file if present: docker-compose.node1.yml, node2, node3
+docker_compose_file: "docker-compose.{{ inventory_hostname }}.yml"
+
+# --- Defaults for env.j2 variables (safe placeholders) ---
+# Image names / tags (can be overridden by UI/vars file)
+NEUROBOSS_IMAGE: "neuroboss:latest"
+AGENT_IMAGE: "agent:latest"
+RAG_IMAGE: "rag:latest"
+
+# Service URLs
+REDIS_URL: "redis://redis:6379/0"
+AGENTHUB_API_URL: "http://localhost:1216"
+NEUROBOSS_API_URL: "http://localhost:8000"
+ASC_MINIO_URL: "http://minio:9000"
+CURRENT_URL: "http://example.local"
+
+# API keys & secrets (placeholders)
+OPENAI_API_KEY: ""
+GOOGLE_API_KEY: ""
+ANTHROPIC_API_KEY: ""
+LANGCHAIN_API_KEY: ""
+ASC_SECRETKEY: ""
+ASC_INTERNSECRETKEY: ""
+FERNET_SECRET: "changeme"
+AGENTHUB_TOKEN: ""
+POETRY_SECRET: ""
+TELEGRAM_API_HASH: ""
+TELEGRAM_NOTIFICATIONS_TOKEN: ""
+TELEGRAM_NEUROBOSS_FEEDBACK_TOKEN: ""
+
+# Database
+DATABASE_URL: "postgresql://postgres:password@localhost:5432/neuroboss"
+AGENTHUB_DATABASE_URL: ""
+POSTGRES_DB: "neuroboss"
+POSTGRES_PASSWORD: ""
+
+# Redis
+REDIS_PORT: 6379
+REDIS_PASSWORD: ""
+
+# MinIO
+ASC_MINIO_ACCESS_KEY: "minioadmin"
+ASC_MINIO_SECRET_KEY: "minioadmin"
+ASC_MINIO_SECURE: false
+
+# General settings
+ASC_PROJECT_MODE: "production"
+ASC_HOST: "0.0.0.0"
+AGENTHUB_ORGANIZATION_ID: ""
+TELEGRAM_API_ID: ""
+TRANSCRIBE_MODEL: "whisper-1"
+TOOL_DEBUG: false
+DB_MIGRATION: false
+
+# LangSmith
+LANGSMITH_TRACING: false
+LANGSMITH_ENDPOINT: ""
+LANGSMITH_PROJECT: ""

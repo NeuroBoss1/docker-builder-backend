@@ -1,0 +1,8 @@
+---
+# Defaults for MinIO role. Override in group_vars or extra_vars (recommended via ansible-vault)
+minio_root_user: "minioadmin"
+minio_root_password: "change_me_now"
+minio_data_dir: "/srv/minio/data"
+minio_port: 9000
+minio_console_port: 9001
+

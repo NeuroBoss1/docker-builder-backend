@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  neuroboss-service:
+    image: ${NEUROBOSS_IMAGE} # Будет браться из .env
+    container_name: neuroboss-service
+    restart: unless-stopped
+    ports:
+      - "1216:1216"
+    environment:
+      # Эти переменные будут переданы Ansible при запуске
+      - REDIS_URL=${REDIS_URL}
+      - AGENTHUB_API_URL=${AGENTHUB_API_URL}
+      # Остальные переменные окружения для сервиса
+      - SENTRY_ENVIRONMENT=development
+      - ASC_PORT=1216
+      - CURRENT_URL=http://neuroboss-service:1216
+      - AGENTHUB_ORGANIZATION_ID=10
+      - TELEGRAM_API_ID=28528600
+      - TRANSCRIBE_MODEL=whisper-1
+      - TOOL_DEBUG=false
+      - SECRET_KEY=93d6b5f7a1c4e8d2b0f9a7c4e1d8b5f2a6c9e3b7d0f4a8c2e5b9d1f7a3c6e8b4
+      - FERNET_SECRET=pfUW0hAtpyGoLgMZrDcw6ikTc6u27NznlgnFkcuUJ5M=
+      - AGENTHUB_TOKEN=agt_eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJvcmdhbml6YXRpb25faWQiOjEwLCJwZXJtaXNzaW9ucyI6WyIqIl0sImV4cGlyZXNfYXRfdGltZXN0YW1wIjpudWxsLCJ1dWlkIjoiZjVlY2FkZTAtMTY0Yi00NDZkLTkxNTYtMzYzNDk1Y2EyMTE2IiwiYWRtaW5pc3RyYXRpdmUiOmZhbHNlfQ.OB8fFZsw8ngYhg5pCnubuy3_Zu7fcbCUswOhH6anBRQ
+      - DB_MIGRATION=false
+      - TELEGRAM_NOTIFICATIONS_TOKEN=7835025423:AAEziYJwh9AiKwpJ6l5Ce0UfsqrFq0NrTyk
+      - TELEGRAM_NEUROBOSS_FEEDBACK_TOKEN=8295382647:AAG0RZiSDEBbrZEmzIC8zs1A3-bLCZBdBnY
+      - TOOLS_DEBUG_MODE=false
+      - TELEGRAM_API_HASH=beb5ba45d7d0b302e2b1281a62c78cb8
+      - DEBUG_MODE=false
+      - ATTP_CONNECTION_URL=attp://35.232.171.222:6563
+    env_file:
+      - .env
+    networks:
+      - default
+
+networks:
+  default:
+    driver: bridge

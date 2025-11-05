@@ -1,0 +1,203 @@
+---
+- name: Deploy NeuroBoss stack to VMs
+  hosts: neuroboss_nodes
+  become: yes
+  vars_files:
+    - group_vars/all.yml
+
+  tasks:
+    - name: Show disk usage (df)
+      shell: df -h --output=source,pcent,target -x tmpfs -x devtmpfs
+      register: disk_usage
+      changed_when: false
+
+    - name: Show inode usage (df -i)
+      shell: df -i -h -x tmpfs -x devtmpfs
+      register: inode_usage
+      changed_when: false
+
+    - name: Show memory usage (free)
+      shell: free -h || true
+      register: mem_usage
+      changed_when: false
+
+    - name: Debug node resources summary
+      debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+
+          Disk usage:
+          {{ disk_usage.stdout | default('') }}
+
+          Inode usage:
+          {{ inode_usage.stdout | default('') }}
+
+          Memory usage:
+          {{ mem_usage.stdout | default('') }}
+    - name: Install prerequisite packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - software-properties-common
+          - python3-apt
+          - ufw
+          - python3-docker
+        state: present
+        update_cache: yes
+
+    - name: Add Docker official GPG key
+      apt_key:
+        url: "https://download.docker.com/linux/{{ 'debian' if ansible_distribution|lower == 'debian' else 'ubuntu' }}/gpg"
+        state: present
+
+    - name: Add Docker apt repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/{{ 'debian' if ansible_distribution|lower == 'debian' else 'ubuntu' }} {{ ansible_lsb.codename }} stable"
+        state: present
+
+    - name: Install Docker and Docker-Compose
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+        update_cache: yes
+      notify: restart docker
+
+    - name: Configure Docker to use gcplogs driver
+      copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "log-driver": "gcplogs"
+          }
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0755'
+      notify: restart docker
+
+    - name: Install docker-compose binary
+      get_url:
+        url: "https://github.com/docker/compose/releases/download/v{{ DOCKER_COMPOSE_VERSION }}/docker-compose-{{ ansible_system | lower }}-{{ ansible_machine | lower }}"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+
+    - name: Create application directory
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0755'
+
+    - name: Copy docker-compose.yml for the specific node
+      copy:
+        src: "../vm/{{ docker_compose_file }}"
+        dest: "{{ app_dir }}/docker-compose.yml"
+        owner: "{{ deploy_user }}"
+        mode: '0644'
+
+    - name: Render nginx.conf template for node1
+      template:
+        src: "../vm/nginx/nginx.conf"
+        dest: "{{ app_dir }}/nginx.conf"
+        owner: "{{ deploy_user }}"
+        mode: '0644'
+      when: inventory_hostname == 'node1'
+
+    - name: Render .env file from template
+      template:
+        src: ./env.j2
+        dest: "{{ app_dir }}/.env"
+        owner: "{{ deploy_user }}"
+        mode: '0600'
+
+    - name: Stop and remove any existing containers to avoid conflicts
+      shell: |
+        if [ -f "{{ app_dir }}/docker-compose.yml" ]; then
+          /usr/local/bin/docker-compose -f {{ app_dir }}/docker-compose.yml down --remove-orphans
+        fi
+        docker rm -f neuroboss-redis || true
+      args:
+        chdir: "{{ app_dir }}"
+      ignore_errors: yes
+
+    # --- Ensure nodes can pull from Artifact Registry using service account ---
+    - name: Copy service account key to node
+      copy:
+        src: /app/secrets/docker-puller-key.json
+        dest: /root/docker-puller-key.json
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Login to Artifact Registry (docker)
+      shell: |
+        cat /root/docker-puller-key.json | docker login -u _json_key --password-stdin https://us-central1-docker.pkg.dev
+      no_log: true
+      args:
+        executable: /bin/bash
+
+    - name: Remove service account key from node
+      file:
+        path: /root/docker-puller-key.json
+        state: absent
+
+    - name: Configure firewall on Node1
+      block:
+        - name: Allow essential ports on Node1
+          ufw: rule=allow port={{ item }}
+          loop: [22, 80, 443, 15011]
+        - name: Allow Redis from Node2
+          ufw: rule=allow src='{{ hostvars['node2'].ansible_host }}' to_port='{{ REDIS_PORT }}' proto=tcp
+        - name: Allow Redis from Node3
+          ufw: rule=allow src='{{ hostvars['node3'].ansible_host }}' to_port='{{ REDIS_PORT }}' proto=tcp
+        - name: Allow ATTP from Node2 to Node1
+          ufw: rule=allow src='{{ hostvars['node2'].ansible_host }}' to_port='6563' proto=tcp
+        - name: Enable UFW on Node1
+          ufw: state=enabled policy=deny
+      when: inventory_hostname == 'node1'
+
+    - name: Configure firewall on Node2
+      block:
+        - name: Allow SSH and Neuroboss port on Node2
+          ufw: rule=allow port={{ item }}
+          loop: [22, 1216]
+        - name: Enable UFW on Node2
+          ufw: state=enabled policy=deny
+      when: inventory_hostname == 'node2'
+
+    - name: Configure firewall on Node3
+      block:
+        - name: Allow SSH, RAG and ChromaDB ports on Node3
+          ufw: rule=allow port={{ item }}
+          loop: [22, 15015, 8000]
+        - name: Enable UFW on Node3
+          ufw: state=enabled policy=deny
+      when: inventory_hostname == 'node3'
+
+    - name: Start docker-compose stack
+      shell: "/usr/local/bin/docker-compose -f {{ app_dir }}/docker-compose.yml up -d"
+      args:
+        chdir: "{{ app_dir }}"
+
+  post_tasks:
+    - name: Wait 5s for containers to initialize
+      pause: seconds=5
+
+    - name: Show running containers
+      shell: "docker ps --format '{% raw %}{{.Names}}\t{{.Status}}\t{{.Ports}}{% endraw %}'"
+      register: docker_ps
+    - debug:
+        var: docker_ps.stdout_lines
+
+  handlers:
+    - name: restart docker
+      service:
+        name: docker
+        state: restarted

@@ -1,0 +1,8 @@
+---
+- name: Deploy MinIO on minio_node (only node3)
+  hosts: minio_node
+  become: yes
+  vars_files: []
+  roles:
+    - minio
+

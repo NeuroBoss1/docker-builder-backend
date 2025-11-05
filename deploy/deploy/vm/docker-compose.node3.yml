@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  rag-service:
+    image: ${RAG_IMAGE} # Будет браться из .env
+    container_name: rag-service
+    restart: unless-stopped
+    ports:
+      - "15015:15015"
+    environment:
+      - ASC_PORT=15015
+      - ASC_ROOT_PATH=/
+      # Подключаемся к ChromaDB в этой же Docker-сети
+      - ASC_CHROMADB_URL=http://chromadb:8000
+      - ASC_CHROMADB_PERSISTANT=false
+      # REDIS_URL будет передан Ansible и будет указывать на node1
+      - REDIS_URL=${REDIS_URL}
+    env_file:
+      - .env
+    networks:
+      - default
+    depends_on:
+      - chromadb
+
+  chromadb:
+    image: chromadb/chroma
+    container_name: chroma
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma-data
+    networks:
+      - default
+
+volumes:
+  chroma_data:
+
+networks:
+  default:
+    driver: bridge

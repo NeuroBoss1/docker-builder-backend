@@ -1,0 +1,77 @@
+- name: Ensure minio user exists
+  ansible.builtin.user:
+    name: minio
+    system: yes
+    create_home: no
+    shell: /sbin/nologin
+
+- name: Create data dir
+  ansible.builtin.file:
+    path: "{{ minio_data_dir }}"
+    state: directory
+    owner: minio
+    group: minio
+    mode: "0755"
+    recurse: yes
+
+- name: Download minio binary
+  ansible.builtin.get_url:
+    url: "https://dl.min.io/server/minio/release/linux-amd64/minio"
+    dest: /usr/local/bin/minio
+    mode: '0755'
+    force: yes
+
+- name: Create minio environment file
+  ansible.builtin.copy:
+    dest: /etc/default/minio
+    content: |
+      MINIO_ROOT_USER={{ minio_root_user }}
+      MINIO_ROOT_PASSWORD={{ minio_root_password }}
+    owner: root
+    group: root
+    mode: '0640'
+
+- name: Create systemd unit file for minio (standalone)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/minio.service
+    content: |
+      [Unit]
+      Description=MinIO
+      Documentation=https://docs.min.io
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      User=minio
+      Group=minio
+      EnvironmentFile=/etc/default/minio
+      ExecStart=/usr/local/bin/minio server {{ minio_data_dir }} --address ":{{ minio_port }}" --console-address ":{{ minio_console_port }}"
+      Restart=on-failure
+      LimitNOFILE=65536
+
+      [Install]
+      WantedBy=multi-user.target
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: Ensure minio service is enabled and started
+  ansible.builtin.systemd:
+    name: minio
+    enabled: yes
+    state: started
+
+- name: Open ports via ufw if available (portable)
+  ansible.builtin.shell: |
+    if command -v ufw >/dev/null 2>&1; then
+      ufw allow {{ minio_port }}/tcp || true
+      ufw allow {{ minio_console_port }}/tcp || true
+    else
+      echo "ufw not present, skipping"
+    fi
+  register: ufw_result
+  ignore_errors: true
