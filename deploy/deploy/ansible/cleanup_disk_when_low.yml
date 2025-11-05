@@ -5,6 +5,8 @@
   vars:
     # trigger threshold in percent (integer). e.g. 85
     threshold_percent: 85
+    # inode usage trigger threshold in percent (integer). e.g. 90
+    inode_threshold_percent: 90
     # how much journal logs to keep (passed to journalctl --vacuum-size)
     journal_vacuum_size: "200M"
     # remove files from /tmp older than this (days)
@@ -13,11 +15,13 @@
     max_log_size_mb: 100
     # if true, will run 'docker system prune -af --volumes' when docker binary present
     perform_docker_prune: true
+    # also prune builder cache (safe) when docker present
+    perform_docker_builder_prune: true
     # remove compressed logs older than (days)
     remove_compressed_logs_older_days: 30
 
   tasks:
-    - name: Check for partitions exceeding threshold
+    - name: Check for partitions exceeding threshold (bytes)
       shell: |
         df -P -x tmpfs -x devtmpfs | awk 'NR>1{gsub(/%/,"",$5); if($5>=ENVIRON["THRESH"]) print $5 "," $6}'
       args:
@@ -27,13 +31,23 @@
       register: high_usage
       changed_when: false
 
-    - name: Debug - partitions above threshold
-      debug:
-        var: high_usage.stdout_lines
+    - name: Check for partitions exceeding inode threshold
+      shell: |
+        df -Pi -x tmpfs -x devtmpfs | awk 'NR>1{gsub(/%/,"",$5); if($5>=ENVIRON["ITHRESH"]) print $5 "," $6}'
+      args:
+        executable: /bin/bash
+      environment:
+        ITHRESH: "{{ inode_threshold_percent }}"
+      register: high_inode_usage
+      changed_when: false
 
-    - name: Skip cleanup when no partition is above threshold
-      meta: end_play
-      when: high_usage.stdout == ""
+    - name: Debug - partitions above thresholds
+      debug:
+        msg: |
+          High byte-usage partitions (>= {{ threshold_percent }}%): {{ high_usage.stdout_lines | default([]) }}
+          High inode-usage partitions (>= {{ inode_threshold_percent }}%): {{ high_inode_usage.stdout_lines | default([]) }}
+
+    # NOTE: Очистка теперь выполняется всегда, вне зависимости от порогов
 
     - name: Start cleanup - apt autoremove/autoclean
       apt:
@@ -47,6 +61,22 @@
         path: /var/lib/apt/lists
         state: absent
       register: apt_lists_removed
+
+    - name: Ensure /var/lib/apt/lists directory exists (after cleanup)
+      file:
+        path: /var/lib/apt/lists
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Ensure /var/lib/apt/lists/partial directory exists (required by apt)
+      file:
+        path: /var/lib/apt/lists/partial
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
 
     - name: Vacuum systemd journal (if journalctl exists)
       shell: journalctl --vacuum-size={{ journal_vacuum_size }}
@@ -96,6 +126,23 @@
         label: "{{ item.path }}"
       ignore_errors: yes
 
+    - name: Clean /var/tmp (remove files older than configured days)
+      find:
+        paths: /var/tmp
+        age: "{{ tmp_file_age_days }}d"
+        recurse: yes
+      register: old_vartmp_files
+
+    - name: Delete old /var/tmp files
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_vartmp_files.files }}"
+      when: old_vartmp_files.matched > 0
+      loop_control:
+        label: "{{ item.path }}"
+      ignore_errors: yes
+
     - name: Check if docker binary exists
       stat:
         path: /usr/bin/docker
@@ -107,18 +154,39 @@
       register: docker_prune
       ignore_errors: yes
 
+    - name: Optionally run docker builder prune (aggressive)
+      shell: docker builder prune -af
+      when: docker_stat.stat.exists and perform_docker_builder_prune | bool
+      register: docker_builder_prune
+      ignore_errors: yes
+
     - name: Re-check disk usage after cleanup
       shell: df -h --output=source,pcent,target -x tmpfs -x devtmpfs
       register: df_after
+      changed_when: false
+
+    - name: Re-check inode usage after cleanup
+      shell: df -Pi -x tmpfs -x devtmpfs
+      register: df_i_after
       changed_when: false
 
     - name: Show disk usage after cleanup
       debug:
         var: df_after.stdout_lines
 
+    - name: Show inode usage after cleanup
+      debug:
+        var: df_i_after.stdout_lines
+
     - name: Summary of actions
       debug:
         msg: |
-          Cleanup completed. apt_cleanup={{ apt_cleanup_result is defined }} apt_lists_removed={{ apt_lists_removed is defined }} journal_vacuum={{ journal_vacuum is defined }} truncate_logs={{ truncate_logs is defined }} docker_prune={{ docker_prune is defined }}
+          Cleanup completed.
+          thresholds: bytes>={{ threshold_percent }}% inodes>={{ inode_threshold_percent }}%
+          pre-check bytes high: {{ high_usage.stdout_lines | default([]) }}
+          pre-check inodes high: {{ high_inode_usage.stdout_lines | default([]) }}
+          apt_cleanup={{ apt_cleanup_result is defined }} apt_lists_removed={{ apt_lists_removed is defined }}
+          journal_vacuum={{ journal_vacuum is defined }} truncate_logs={{ truncate_logs is defined }}
+          docker_prune={{ docker_prune is defined }} docker_builder_prune={{ docker_builder_prune is defined }}
 
 # End of playbook

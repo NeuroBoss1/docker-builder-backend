@@ -156,15 +156,15 @@ def process_deploy(job_id: str, mappings: Dict):
                 tmp_file_path = tf.name
                 try:
                     for k, v in vars_map.items():
-                        safe_v = str(v).replace('"', '\\"')
+                        safe_v = str(v).replace('"', '\"')
                         tf.write(f'{k}: "{safe_v}"\n')
                     tf.write('mappings:\n')
                     if isinstance(mappings, dict):
                         for mk, mv in mappings.items():
-                            safe_mv = str(mv).replace('"', '\\"')
+                            safe_mv = str(mv).replace('"', '\"')
                             tf.write(f'  {mk}: "{safe_mv}"\n')
                     else:
-                        safe_json = json.dumps(mappings).replace('"', '\\"')
+                        safe_json = json.dumps(mappings).replace('"', '\"')
                         tf.write(f'  raw: "{safe_json}"\n')
                 finally:
                     tf.close()
@@ -287,6 +287,45 @@ def process_deploy(job_id: str, mappings: Dict):
             except Exception:
                 pass
 
+            # PRE-STEP: run cleanup playbook unconditionally before main deploy
+            cleanup_playbook = 'cleanup_disk_when_low.yml'
+            cleanup_path = os.path.join(playbook_dir, cleanup_playbook)
+            if os.path.exists(cleanup_path):
+                cleanup_cmd = [
+                    ansible_bin,
+                    '-i', inventory,
+                    cleanup_playbook,
+                    '-u', 'psychopanda',
+                    '--vault-password-file', vault_pw,
+                    '--limit', limit_str,
+                    '--ssh-common-args', ssh_common,
+                ]
+                if chosen_ssh_key:
+                    cleanup_cmd.extend(['--private-key', chosen_ssh_key])
+                await store.append_log(job_id, f'Running pre-cleanup playbook: {cleanup_playbook}')
+                try:
+                    cproc = await asyncio.create_subprocess_exec(
+                        *cleanup_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                        cwd=playbook_dir,
+                        env=env
+                    )
+                    assert cproc.stdout is not None
+                    while True:
+                        cline = await cproc.stdout.readline()
+                        if not cline:
+                            break
+                        await store.append_log(job_id, cline.decode(errors='replace').rstrip())
+                    crc = await cproc.wait()
+                    if crc != 0:
+                        await store.append_log(job_id, f'WARNING: cleanup playbook exited with code {crc}, continuing deploy')
+                except Exception as e:
+                    await store.append_log(job_id, f'WARNING: failed to run cleanup playbook: {e}')
+            else:
+                await store.append_log(job_id, 'cleanup_disk_when_low.yml not found, skipping pre-cleanup')
+
+            # MAIN DEPLOY
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
