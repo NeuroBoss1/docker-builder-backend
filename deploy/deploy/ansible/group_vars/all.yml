@@ -10,7 +10,7 @@ ansible_ssh_private_key_file: "{{ playbook_dir }}/../../../secrets/google_comput
 # Google Secret Manager Configuration
 # ========================================
 # Укажите ваш GCP Project ID
-gcp_project_id: "your-gcp-project-id"
+gcp_project_id: "augmented-audio-474107-v3"
 
 # Service Account для доступа к Secret Manager
 # Можно указать путь к JSON ключу или использовать Application Default Credentials
@@ -35,8 +35,8 @@ RAG_IMAGE: "rag:latest"
 
 # Service URLs
 REDIS_URL: "redis://redis:6379/0"
-AGENTHUB_API_URL: "http://localhost:1216"
-NEUROBOSS_API_URL: "http://localhost:8000"
+AGENTHUB_API_URL: "http://35.232.171.222:15015"
+NEUROBOSS_API_URL: "http://34.122.85.24:1216"
 ASC_MINIO_URL: "http://minio:9000"
 CURRENT_URL: "http://example.local"
 
